@@ -1,0 +1,7 @@
+.gocache/
+.gomodcache/
+logs/
+.DS_Store
+
+config/qqbot.json
+config/config/data/

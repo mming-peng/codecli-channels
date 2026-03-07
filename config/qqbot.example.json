@@ -1,0 +1,49 @@
+{
+  "defaultAccountId": "default",
+  "defaultTimezone": "Asia/Shanghai",
+  "accounts": {
+    "default": {
+      "enabled": true,
+      "appId": "你的AppID",
+      "clientSecret": "你的AppSecret"
+    },
+    "bot2": {
+      "enabled": false,
+      "appId": "第二个机器人AppID",
+      "clientSecret": "第二个机器人AppSecret"
+    }
+  },
+  "bridge": {
+    "enabled": true,
+    "accountIds": ["default"],
+    "allowAllTargets": false,
+    "allowedTargets": [
+      "default:user:你的openid"
+    ],
+    "requireCommandPrefix": true,
+    "readOnlyPrefixes": ["/ask", "/read", "问问"],
+    "writePrefixes": ["/run", "/exec", "执行"],
+    "confirmPrefixes": ["/confirm", "/确认"],
+    "projects": {
+      "feishu-connect": {
+        "path": "/Users/ming/ai/feishu-connect",
+        "description": "当前主项目"
+      },
+      "qq-codex-go": {
+        "path": "/Users/ming/ai/feishu-connect/qq-codex-go",
+        "description": "Go 版 QQ-Codex 持久会话桥接"
+      }
+    },
+    "defaultProject": "qq-codex-go",
+    "codexTimeoutMs": 600000,
+    "qqMaxReplyChars": 1500,
+    "maxPromptChars": 4000,
+    "readOnlyCodexSandbox": "read-only",
+    "writeCodexSandbox": "workspace-write",
+    "codexModel": null,
+    "confirmationTtlMs": 600000,
+    "auditEnabled": true,
+    "defaultRunMode": "write",
+    "implicitMessageMode": "write"
+  }
+}
