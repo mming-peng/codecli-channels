@@ -3,6 +3,8 @@ package bridge
 import (
 	"strings"
 	"testing"
+
+	"qq-codex-go/internal/codex"
 )
 
 func TestExtractFailureSummary(t *testing.T) {
@@ -32,5 +34,27 @@ func TestLooksLikeNeverPolicyResponse(t *testing.T) {
 		if !looksLikeNeverPolicyResponse(item) {
 			t.Fatalf("expected match for %q", item)
 		}
+	}
+}
+
+func TestParseApprovalCommandDecision(t *testing.T) {
+	decision, ok := parseApprovalCommandDecision("/approve")
+	if !ok || decision != codex.ApprovalAllow {
+		t.Fatalf("unexpected decision: ok=%v decision=%v", ok, decision)
+	}
+	decision, ok = parseApprovalCommandDecision("/approve session")
+	if !ok || decision != codex.ApprovalAllowForSession {
+		t.Fatalf("unexpected session decision: ok=%v decision=%v", ok, decision)
+	}
+}
+
+func TestParseNaturalApprovalDecision(t *testing.T) {
+	decision, ok := parseNaturalApprovalDecision("本会话允许")
+	if !ok || decision != codex.ApprovalAllowForSession {
+		t.Fatalf("unexpected decision: ok=%v decision=%v", ok, decision)
+	}
+	decision, ok = parseNaturalApprovalDecision("拒绝")
+	if !ok || decision != codex.ApprovalDeny {
+		t.Fatalf("unexpected deny decision: ok=%v decision=%v", ok, decision)
 	}
 }

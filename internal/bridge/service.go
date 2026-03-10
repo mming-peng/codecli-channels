@@ -36,7 +36,7 @@ type Service struct {
 	logger   *slog.Logger
 	store    *store.Store
 	api      *qq.APIClient
-	runner   *codex.Runner
+	runner   codex.TurnRunner
 	audit    *AuditLogger
 	gateways map[string]*qq.Gateway
 
@@ -56,7 +56,7 @@ func NewService(cfg *cfgpkg.Config, logger *slog.Logger) (*Service, error) {
 		logger:               logger,
 		store:                stateStore,
 		api:                  qq.NewAPIClient(cfg),
-		runner:               codex.NewRunner(),
+		runner:               codex.NewAppServerRunner(),
 		audit:                NewAuditLogger(cfg.Bridge.AuditFile),
 		gateways:             map[string]*qq.Gateway{},
 		busy:                 map[string]bool{},
@@ -119,11 +119,11 @@ func (s *Service) handleMessage(ctx context.Context, msg qq.IncomingMessage) {
 	case strings.HasPrefix(text, "/mode"):
 		s.handleModeCommand(ctx, msg)
 		return
-	case text == "/approve":
-		s.handleApprove(ctx, msg)
+	case text == "/approve" || strings.HasPrefix(text, "/approve "):
+		s.handleApprove(ctx, msg, text)
 		return
-	case text == "/deny":
-		s.handleDeny(ctx, msg)
+	case text == "/deny" || strings.HasPrefix(text, "/deny "):
+		s.handleDeny(ctx, msg, text)
 		return
 	}
 
@@ -321,15 +321,25 @@ func (s *Service) handleConfirm(ctx context.Context, msg qq.IncomingMessage) {
 	go s.executeTask(context.Background(), msg, pending.Mode, pending.Body)
 }
 
-func (s *Service) handleApprove(ctx context.Context, msg qq.IncomingMessage) {
-	if s.resolveNativeApproval(msg.ConversationKey(), codex.ApprovalAllow) {
+func (s *Service) handleApprove(ctx context.Context, msg qq.IncomingMessage, text string) {
+	decision, ok := parseApprovalCommandDecision(text)
+	if !ok {
+		s.reply(ctx, msg, "支持：/approve 或 /approve session")
+		return
+	}
+	if s.resolveNativeApproval(msg.ConversationKey(), decision) {
 		return
 	}
 	s.reply(ctx, msg, "当前没有待处理的审批请求。")
 }
 
-func (s *Service) handleDeny(ctx context.Context, msg qq.IncomingMessage) {
-	if s.resolveNativeApproval(msg.ConversationKey(), codex.ApprovalDeny) {
+func (s *Service) handleDeny(ctx context.Context, msg qq.IncomingMessage, text string) {
+	decision, ok := parseDenyCommandDecision(text)
+	if !ok {
+		s.reply(ctx, msg, "支持：/deny")
+		return
+	}
+	if s.resolveNativeApproval(msg.ConversationKey(), decision) {
 		return
 	}
 	s.reply(ctx, msg, "当前没有待处理的审批请求。")
@@ -350,12 +360,31 @@ func (s *Service) executeTask(ctx context.Context, msg qq.IncomingMessage, mode,
 		return
 	}
 
-	sandbox := ""
+	sandbox := s.cfg.Bridge.WriteCodexSandbox
 	if mode == "read" {
 		sandbox = s.cfg.Bridge.ReadOnlyCodexSandbox
 	}
+	var streamedFinal string
+	var streamedMu sync.Mutex
+	notifyDone := make(chan struct{})
+	defer close(notifyDone)
+	go func() {
+		timer := time.NewTimer(2 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			streamedMu.Lock()
+			hasFinal := streamedFinal != ""
+			streamedMu.Unlock()
+			if !hasFinal {
+				s.proactive(context.Background(), msg, "收到，正在处理…")
+			}
+		case <-notifyDone:
+		}
+	}()
 	result, err := s.runner.RunTurn(ctx, codex.TurnOptions{
 		Prompt:         body,
+		SessionID:      session.ID,
 		ProjectAlias:   project.Alias,
 		ProjectPath:    project.Path,
 		TargetType:     msg.ChatType,
@@ -366,18 +395,38 @@ func (s *Service) executeTask(ctx context.Context, msg qq.IncomingMessage, mode,
 		Model:          s.cfg.Bridge.CodexModel,
 		MaxPromptChars: s.cfg.Bridge.MaxPromptChars,
 		Timeout:        time.Duration(s.cfg.Bridge.CodexTimeoutMs) * time.Millisecond,
+		ProgressHandler: func(event codex.ProgressEvent) {
+			text := strings.TrimSpace(filterProgressForQQ(event.Text, body))
+			if text == "" {
+				return
+			}
+			streamedMu.Lock()
+			if streamedFinal != "" {
+				streamedMu.Unlock()
+				return
+			}
+			streamedFinal = text
+			streamedMu.Unlock()
+			for _, chunk := range splitForQQ(trimForQQ(text, s.cfg.Bridge.QQMaxReplyChars), s.cfg.Bridge.QQMaxReplyChars) {
+				s.proactive(context.Background(), msg, chunk)
+			}
+		},
 		ApprovalHandler: func(req codex.ApprovalRequest) (codex.ApprovalDecision, error) {
 			decisionCh := make(chan codex.ApprovalDecision, 1)
 			state := &nativeApprovalState{Request: req, Decision: decisionCh, ExpiresAt: time.Now().Add(time.Duration(s.cfg.Bridge.ConfirmationTTLMS) * time.Millisecond)}
 			s.setNativeApproval(conversationKey, state)
+			title := strings.TrimSpace(req.Title)
+			if title == "" {
+				title = "Codex 原生审批请求："
+			}
 			prompt := []string{
-				"Codex 原生审批请求：",
+				title,
 				"原因：" + req.Reason,
 			}
 			if strings.TrimSpace(req.Command) != "" {
 				prompt = append(prompt, "命令：`"+req.Command+"`")
 			}
-			prompt = append(prompt, "回复“同意/拒绝”或 /approve /deny。")
+			prompt = append(prompt, "回复“同意/拒绝/本会话允许”或 /approve [session] /deny。")
 			s.proactive(context.Background(), msg, strings.Join(prompt, "\n"))
 			select {
 			case decision := <-decisionCh:
@@ -418,6 +467,12 @@ func (s *Service) executeTask(ctx context.Context, msg qq.IncomingMessage, mode,
 		content = "我这边执行完成了，但没有拿到可返回的文本结果。"
 	}
 	s.auditIfEnabled(AuditEvent{Status: "success", AccountID: msg.AccountID, ChatType: msg.ChatType, TargetID: msg.TargetID, SenderID: msg.SenderID, ProjectAlias: project.Alias, ProjectPath: project.Path, SessionID: session.ID, Mode: mode, Text: body})
+	streamedMu.Lock()
+	shouldSkip := streamedFinal != "" && shouldSkipFinalReply(streamedFinal, content)
+	streamedMu.Unlock()
+	if shouldSkip {
+		return
+	}
 	for _, chunk := range splitForQQ(trimForQQ(content, s.cfg.Bridge.QQMaxReplyChars), s.cfg.Bridge.QQMaxReplyChars) {
 		s.proactive(context.Background(), msg, chunk)
 	}
@@ -578,18 +633,24 @@ func (s *Service) resolveNativeApproval(key string, decision codex.ApprovalDecis
 }
 
 func (s *Service) handleNaturalApproval(_ context.Context, msg qq.IncomingMessage, text string) bool {
-	lower := strings.ToLower(strings.TrimSpace(text))
-	if isAllowResponse(lower) {
-		return s.resolveNativeApproval(msg.ConversationKey(), codex.ApprovalAllow)
-	}
-	if isDenyResponse(lower) {
-		return s.resolveNativeApproval(msg.ConversationKey(), codex.ApprovalDeny)
+	if decision, ok := parseNaturalApprovalDecision(text); ok {
+		return s.resolveNativeApproval(msg.ConversationKey(), decision)
 	}
 	return false
 }
 
 func isAllowResponse(text string) bool {
 	words := []string{"同意", "通过", "继续", "可以", "好", "好的", "允许", "yes", "y", "ok", "approve"}
+	for _, word := range words {
+		if text == strings.ToLower(word) {
+			return true
+		}
+	}
+	return false
+}
+
+func isAllowForSessionResponse(text string) bool {
+	words := []string{"本会话允许", "允许本会话", "本会话同意", "session", "for session", "approve session"}
 	for _, word := range words {
 		if text == strings.ToLower(word) {
 			return true
@@ -606,6 +667,40 @@ func isDenyResponse(text string) bool {
 		}
 	}
 	return false
+}
+
+func parseApprovalCommandDecision(text string) (codex.ApprovalDecision, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(text))
+	switch normalized {
+	case "/approve":
+		return codex.ApprovalAllow, true
+	case "/approve session", "/approve for-session", "/approve for_session":
+		return codex.ApprovalAllowForSession, true
+	default:
+		return 0, false
+	}
+}
+
+func parseDenyCommandDecision(text string) (codex.ApprovalDecision, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(text))
+	if normalized == "/deny" {
+		return codex.ApprovalDeny, true
+	}
+	return 0, false
+}
+
+func parseNaturalApprovalDecision(text string) (codex.ApprovalDecision, bool) {
+	lower := strings.ToLower(strings.TrimSpace(text))
+	if isAllowForSessionResponse(lower) {
+		return codex.ApprovalAllowForSession, true
+	}
+	if isAllowResponse(lower) {
+		return codex.ApprovalAllow, true
+	}
+	if isDenyResponse(lower) {
+		return codex.ApprovalDeny, true
+	}
+	return 0, false
 }
 
 func filterProgressForQQ(text, userBody string) string {

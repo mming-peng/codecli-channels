@@ -24,8 +24,13 @@ type Runner struct {
 	Binary string
 }
 
+type TurnRunner interface {
+	RunTurn(ctx context.Context, opts TurnOptions) (TurnResult, error)
+}
+
 type TurnOptions struct {
 	Prompt          string
+	SessionID       string
 	ProjectAlias    string
 	ProjectPath     string
 	TargetType      string
@@ -63,6 +68,8 @@ type ApprovalDecision int
 const (
 	ApprovalDeny ApprovalDecision = iota
 	ApprovalAllow
+	ApprovalAllowForSession
+	ApprovalCancel
 )
 
 var (
@@ -447,7 +454,7 @@ func handleApprovalRequest(ptmx *os.File, opts TurnOptions, progress *progressAc
 			decision = decisionValue
 		}
 	}
-	if decision == ApprovalAllow {
+	if decision == ApprovalAllow || decision == ApprovalAllowForSession {
 		_, _ = ptmx.Write([]byte("\r"))
 		return false
 	}
@@ -489,6 +496,10 @@ func respondToTerminalQueries(ptmx *os.File, text string) {
 }
 
 func prepareCodexRuntimeHome(projectPath string) (string, error) {
+	return prepareScopedCodexRuntimeHome(projectPath, "")
+}
+
+func prepareScopedCodexRuntimeHome(projectPath, scope string) (string, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
@@ -497,7 +508,11 @@ func prepareCodexRuntimeHome(projectPath string) (string, error) {
 	if strings.TrimSpace(sourceHome) == "" {
 		sourceHome = filepath.Join(homeDir, ".codex")
 	}
-	hash := sha1.Sum([]byte(projectPath))
+	hashInput := projectPath
+	if strings.TrimSpace(scope) != "" {
+		hashInput = projectPath + "\n" + scope
+	}
+	hash := sha1.Sum([]byte(hashInput))
 	runtimeHome := filepath.Join(os.TempDir(), "qq-codex-go-codex-home", hex.EncodeToString(hash[:8]))
 	if err := os.MkdirAll(runtimeHome, 0o755); err != nil {
 		return "", err

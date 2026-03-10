@@ -127,7 +127,7 @@ func BuildHelpText(cfg cfgpkg.BridgeConfig) string {
 		fmt.Sprintf("%s 你的问题 - 只读分析，不改文件", readPrefixes[0]),
 		fmt.Sprintf("%s 你的需求 - 在当前项目执行 Codex", writePrefixes[0]),
 		fmt.Sprintf("%s - 确认执行高风险写操作", confirmPrefixes[0]),
-		"/approve - 同意当前 Codex 原生审批",
+		"/approve [session] - 同意当前 Codex 原生审批，可选本会话记忆",
 		"/deny - 拒绝当前 Codex 原生审批",
 	}, "\n")
 }
