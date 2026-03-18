@@ -127,8 +127,8 @@ Recommended validation order:
 | `/help` | Show help |
 | `/clear` | Start a fresh session |
 | `/mode` | Show current default mode |
-| `/mode write` | Default to writable execution |
-| `/mode read` | Default to read-only analysis |
+| `/mode write` | Set the current session default to writable execution |
+| `/mode read` | Set the current session default to read-only analysis |
 
 ### Project
 
@@ -153,7 +153,7 @@ Recommended validation order:
 | --- | --- |
 | `/ask <question>` | Read-only analysis |
 | `/run <task>` | Writable execution |
-| plain message | Uses `implicitMessageMode` |
+| plain message | Uses the current session mode; the first auto-created session is seeded from `implicitMessageMode` |
 
 ## Approval Model
 
@@ -204,7 +204,7 @@ When the first `final_answer` becomes available, the bridge prefers sending it i
 
 ### Reply splitting
 
-Long replies are automatically split according to `qqMaxReplyChars`.
+Long replies are automatically split into multiple QQ messages according to `qqMaxReplyChars`.
 
 ## Documentation
 

@@ -127,8 +127,8 @@ go build -o ./bin/qq-codex-go ./cmd/qq-codex-go
 | `/help` | 查看帮助 |
 | `/clear` | 开一个新会话 |
 | `/mode` | 查看当前默认模式 |
-| `/mode write` | 默认按可写执行 |
-| `/mode read` | 默认按只读分析 |
+| `/mode write` | 把当前会话默认模式切到可写执行 |
+| `/mode read` | 把当前会话默认模式切到只读分析 |
 
 ### 项目命令
 
@@ -153,7 +153,7 @@ go build -o ./bin/qq-codex-go ./cmd/qq-codex-go
 | --- | --- |
 | `/ask <问题>` | 只读分析 |
 | `/run <任务>` | 可写执行 |
-| 普通消息 | 按 `implicitMessageMode` 进入读/写模式 |
+| 普通消息 | 按当前会话模式执行；首次自动建会话时初始值来自 `implicitMessageMode` |
 
 ## 审批模型
 
@@ -208,7 +208,7 @@ go build -o ./bin/qq-codex-go ./cmd/qq-codex-go
 
 ### 长回复自动分段
 
-长回复会根据 `qqMaxReplyChars` 自动切分发送。
+长回复会根据 `qqMaxReplyChars` 自动切成多条 QQ 消息发送。
 
 ## 文档
 

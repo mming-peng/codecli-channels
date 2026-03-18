@@ -51,7 +51,7 @@ config/qqbot.example.json
 
 ### `implicitMessageMode`
 
-控制普通消息默认按什么模式解释：
+控制普通消息首次自动建会话时采用什么初始模式；后续普通消息会沿用当前会话模式：
 
 - `write`
 - `read`

@@ -51,7 +51,7 @@ Sets the default mode for newly created sessions:
 
 ### `implicitMessageMode`
 
-Controls how plain messages are interpreted:
+Controls the initial mode used when a plain message auto-creates a session; later plain messages follow the current session mode:
 
 - `write`
 - `read`

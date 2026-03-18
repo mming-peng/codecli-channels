@@ -133,9 +133,13 @@ func (s *Service) handleMessage(ctx context.Context, msg qq.IncomingMessage) {
 
 	parsed := ParseBridgeCommand(text, s.cfg.Bridge)
 	if parsed.Type == "unmatched" {
-		implicitMode := strings.ToLower(strings.TrimSpace(s.cfg.Bridge.ImplicitMessageMode))
+		implicitMode, err := s.resolveImplicitRunMode(msg)
+		if err != nil {
+			s.reply(ctx, msg, fmt.Sprintf("加载会话失败：%v", err))
+			return
+		}
 		if implicitMode == "read" || implicitMode == "write" {
-			go s.executeTask(context.Background(), msg, implicitMode, text)
+			s.dispatchTask(ctx, msg, implicitMode, text, false)
 			return
 		}
 		hint := "消息已收到，但没有匹配到可执行模式。"
@@ -153,7 +157,7 @@ func (s *Service) handleMessage(ctx context.Context, msg qq.IncomingMessage) {
 		s.reply(ctx, msg, "前缀后面还需要跟具体需求。")
 		return
 	}
-	go s.executeTask(context.Background(), msg, parsed.Mode, parsed.Body)
+	s.dispatchTask(ctx, msg, parsed.Mode, parsed.Body, false)
 }
 
 func (s *Service) handleProjectCommand(ctx context.Context, msg qq.IncomingMessage) {
@@ -292,7 +296,7 @@ func (s *Service) handleModeCommand(ctx context.Context, msg qq.IncomingMessage)
 		return
 	}
 	if len(parts) == 1 {
-		s.reply(ctx, msg, fmt.Sprintf("当前默认执行模式：%s\n普通消息模式：%s\nwrite = %s", session.DefaultRunMode, s.cfg.Bridge.ImplicitMessageMode, s.cfg.Bridge.WriteCodexSandbox))
+		s.reply(ctx, msg, fmt.Sprintf("当前会话默认执行模式：%s\n新会话默认模式（配置）：%s\n普通消息首次建会话时默认：%s", session.DefaultRunMode, s.cfg.Bridge.DefaultRunMode, s.cfg.Bridge.ImplicitMessageMode))
 		return
 	}
 	mode := strings.ToLower(strings.TrimSpace(parts[1]))
@@ -318,7 +322,7 @@ func (s *Service) handleConfirm(ctx context.Context, msg qq.IncomingMessage) {
 		_ = s.store.SetProjectAlias(msg.ConversationKey(), pending.ProjectAlias)
 	}
 	s.clearPendingConfirmation(msg.ConversationKey())
-	go s.executeTask(context.Background(), msg, pending.Mode, pending.Body)
+	s.dispatchTask(ctx, msg, pending.Mode, pending.Body, true)
 }
 
 func (s *Service) handleApprove(ctx context.Context, msg qq.IncomingMessage, text string) {
@@ -407,7 +411,7 @@ func (s *Service) executeTask(ctx context.Context, msg qq.IncomingMessage, mode,
 			}
 			streamedFinal = text
 			streamedMu.Unlock()
-			for _, chunk := range splitForQQ(trimForQQ(text, s.cfg.Bridge.QQMaxReplyChars), s.cfg.Bridge.QQMaxReplyChars) {
+			for _, chunk := range splitForQQ(text, s.cfg.Bridge.QQMaxReplyChars) {
 				s.proactive(context.Background(), msg, chunk)
 			}
 		},
@@ -473,7 +477,7 @@ func (s *Service) executeTask(ctx context.Context, msg qq.IncomingMessage, mode,
 	if shouldSkip {
 		return
 	}
-	for _, chunk := range splitForQQ(trimForQQ(content, s.cfg.Bridge.QQMaxReplyChars), s.cfg.Bridge.QQMaxReplyChars) {
+	for _, chunk := range splitForQQ(content, s.cfg.Bridge.QQMaxReplyChars) {
 		s.proactive(context.Background(), msg, chunk)
 	}
 }
@@ -487,6 +491,64 @@ func buildFailureReply(execErr error, result codex.TurnResult, userBody string) 
 		return fmt.Sprintf("执行失败：%v", execErr)
 	}
 	return fmt.Sprintf("执行失败：%v\n\n%s", execErr, tailText(details, 1200))
+}
+
+func (s *Service) dispatchTask(ctx context.Context, msg qq.IncomingMessage, mode, body string, confirmed bool) {
+	if !confirmed {
+		if s.requestDangerousTaskConfirmation(ctx, msg, mode, body) {
+			return
+		}
+	}
+	go s.executeTask(context.Background(), msg, mode, body)
+}
+
+func (s *Service) requestDangerousTaskConfirmation(ctx context.Context, msg qq.IncomingMessage, mode, body string) bool {
+	danger := shouldRequireConfirmation(mode, body)
+	if !danger.Matched {
+		return false
+	}
+	project := s.resolveCurrentProject(msg.ConversationKey())
+	s.setPendingConfirmation(msg.ConversationKey(), PendingTask{
+		Mode:         mode,
+		Body:         body,
+		Reason:       danger.Reason,
+		ProjectAlias: project.Alias,
+		ProjectPath:  project.Path,
+		ExpiresAt:    time.Now().Add(time.Duration(s.cfg.Bridge.ConfirmationTTLMS) * time.Millisecond),
+	})
+	s.auditIfEnabled(AuditEvent{
+		Status:       "awaiting_confirm",
+		Reason:       danger.Reason,
+		AccountID:    msg.AccountID,
+		ChatType:     msg.ChatType,
+		TargetID:     msg.TargetID,
+		SenderID:     msg.SenderID,
+		ProjectAlias: project.Alias,
+		ProjectPath:  project.Path,
+		Mode:         mode,
+		Text:         body,
+	})
+	confirmPrefixes := normalizePrefixes(s.cfg.Bridge.ConfirmPrefixes, defaultConfirmPrefixes)
+	confirmCommand := defaultConfirmPrefixes[0]
+	if len(confirmPrefixes) > 0 {
+		confirmCommand = confirmPrefixes[0]
+	}
+	s.reply(ctx, msg, fmt.Sprintf("%s\n\n检测到高风险写操作。回复 `%s` 后我再继续执行。", danger.Reason, confirmCommand))
+	return true
+}
+
+func (s *Service) resolveImplicitRunMode(msg qq.IncomingMessage) (string, error) {
+	conversationKey := msg.ConversationKey()
+	project := s.resolveCurrentProject(conversationKey)
+	session, err := s.store.GetOrCreateActiveSession(conversationKey, project.Alias, project.Path, s.implicitSessionInitMode())
+	if err != nil {
+		return "", err
+	}
+	return resolveDefaultRunMode(session.DefaultRunMode, s.cfg.Bridge.ImplicitMessageMode, s.cfg.Bridge.DefaultRunMode), nil
+}
+
+func (s *Service) implicitSessionInitMode() string {
+	return resolveDefaultRunMode("", s.cfg.Bridge.ImplicitMessageMode, s.cfg.Bridge.DefaultRunMode)
 }
 
 func extractFailureSummary(text, userBody string) string {
@@ -703,6 +765,30 @@ func parseNaturalApprovalDecision(text string) (codex.ApprovalDecision, bool) {
 	return 0, false
 }
 
+func shouldRequireConfirmation(mode, body string) DangerousMatch {
+	if normalizeRunMode(mode) != "write" {
+		return DangerousMatch{}
+	}
+	return DetectDangerousTask(body)
+}
+
+func resolveDefaultRunMode(values ...string) string {
+	for _, value := range values {
+		if mode := normalizeRunMode(value); mode != "" {
+			return mode
+		}
+	}
+	return "write"
+}
+
+func normalizeRunMode(value string) string {
+	mode := strings.ToLower(strings.TrimSpace(value))
+	if mode == "read" || mode == "write" {
+		return mode
+	}
+	return ""
+}
+
 func filterProgressForQQ(text, userBody string) string {
 	lines := strings.Split(strings.ReplaceAll(text, "\r", "\n"), "\n")
 	kept := make([]string, 0, len(lines))
@@ -854,6 +940,13 @@ func trimForLog(text string, maxChars int) string {
 }
 
 func splitForQQ(text string, maxChars int) []string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return []string{"我这边执行完成了，但没有拿到可返回的文本结果。"}
+	}
+	if maxChars <= 0 {
+		return []string{text}
+	}
 	runes := []rune(text)
 	if len(runes) <= maxChars {
 		return []string{text}

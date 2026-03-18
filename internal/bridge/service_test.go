@@ -58,3 +58,35 @@ func TestParseNaturalApprovalDecision(t *testing.T) {
 		t.Fatalf("unexpected deny decision: ok=%v decision=%v", ok, decision)
 	}
 }
+
+func TestShouldRequireConfirmation(t *testing.T) {
+	match := shouldRequireConfirmation("write", "请执行 rm -rf build")
+	if !match.Matched {
+		t.Fatal("expected dangerous write task to require confirmation")
+	}
+	if shouldRequireConfirmation("read", "请执行 rm -rf build").Matched {
+		t.Fatal("read mode should not require confirmation")
+	}
+}
+
+func TestResolveDefaultRunMode(t *testing.T) {
+	if got := resolveDefaultRunMode("read", "write"); got != "read" {
+		t.Fatalf("expected session mode to win, got %q", got)
+	}
+	if got := resolveDefaultRunMode("", "read", "write"); got != "read" {
+		t.Fatalf("expected implicit mode fallback, got %q", got)
+	}
+	if got := resolveDefaultRunMode("", "", ""); got != "write" {
+		t.Fatalf("expected write default, got %q", got)
+	}
+}
+
+func TestSplitForQQDoesNotTruncate(t *testing.T) {
+	got := splitForQQ("abcdef", 4)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 chunks, got %d", len(got))
+	}
+	if strings.Join(got, "") != "abcdef" {
+		t.Fatalf("unexpected chunks: %#v", got)
+	}
+}
