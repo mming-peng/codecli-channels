@@ -12,19 +12,21 @@ import (
 )
 
 type SessionRecord struct {
-	ID             string    `json:"id"`
-	OwnerKey       string    `json:"ownerKey"`
-	ProjectAlias   string    `json:"projectAlias"`
-	ProjectPath    string    `json:"projectPath"`
-	Name           string    `json:"name"`
-	ThreadID       string    `json:"threadId,omitempty"`
-	DefaultRunMode string    `json:"defaultRunMode"`
-	CreatedAt      time.Time `json:"createdAt"`
-	UpdatedAt      time.Time `json:"updatedAt"`
+	ID              string    `json:"id"`
+	OwnerKey        string    `json:"ownerKey"`
+	ProjectAlias    string    `json:"projectAlias"`
+	ProjectPath     string    `json:"projectPath"`
+	Name            string    `json:"name"`
+	ThreadID        string    `json:"threadId,omitempty"`
+	ClaudeSessionID string    `json:"claudeSessionId,omitempty"`
+	DefaultRunMode  string    `json:"defaultRunMode"`
+	CreatedAt       time.Time `json:"createdAt"`
+	UpdatedAt       time.Time `json:"updatedAt"`
 }
 
 type state struct {
 	ConversationProjects map[string]string         `json:"conversationProjects"`
+	ConversationBackends map[string]string         `json:"conversationBackends"`
 	ActiveSessions       map[string]string         `json:"activeSessions"`
 	Sessions             map[string]*SessionRecord `json:"sessions"`
 	NextSessionID        int64                     `json:"nextSessionId"`
@@ -40,6 +42,7 @@ func New(path string) (*Store, error) {
 	s := &Store{path: path}
 	s.data = state{
 		ConversationProjects: map[string]string{},
+		ConversationBackends: map[string]string{},
 		ActiveSessions:       map[string]string{},
 		Sessions:             map[string]*SessionRecord{},
 	}
@@ -73,6 +76,9 @@ func (s *Store) load() error {
 	}
 	if loaded.ConversationProjects == nil {
 		loaded.ConversationProjects = map[string]string{}
+	}
+	if loaded.ConversationBackends == nil {
+		loaded.ConversationBackends = map[string]string{}
 	}
 	if loaded.ActiveSessions == nil {
 		loaded.ActiveSessions = map[string]string{}
@@ -109,6 +115,32 @@ func (s *Store) GetProjectAlias(conversationKey, defaultAlias string) string {
 		_ = s.saveLocked()
 	}
 	return alias
+}
+
+func (s *Store) GetBackend(conversationKey, defaultBackend string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	backend := strings.ToLower(strings.TrimSpace(s.data.ConversationBackends[conversationKey]))
+	if backend == "" {
+		backend = strings.ToLower(strings.TrimSpace(defaultBackend))
+		if backend == "" {
+			backend = "codex"
+		}
+		s.data.ConversationBackends[conversationKey] = backend
+		_ = s.saveLocked()
+	}
+	return backend
+}
+
+func (s *Store) SetBackend(conversationKey, backend string) error {
+	backend = strings.ToLower(strings.TrimSpace(backend))
+	if backend == "" {
+		backend = "codex"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data.ConversationBackends[conversationKey] = backend
+	return s.saveLocked()
 }
 
 func (s *Store) SetProjectAlias(conversationKey, alias string) error {
@@ -219,6 +251,7 @@ func (s *Store) UpdateSession(record *SessionRecord) error {
 	}
 	current.Name = record.Name
 	current.ThreadID = record.ThreadID
+	current.ClaudeSessionID = record.ClaudeSessionID
 	current.ProjectPath = record.ProjectPath
 	current.DefaultRunMode = record.DefaultRunMode
 	current.UpdatedAt = time.Now()

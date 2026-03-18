@@ -1,6 +1,6 @@
 # qq-codex-go
 
-Remote Codex for QQ.
+Remote Codex / Claude Code for QQ.
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -14,6 +14,7 @@ It is built for real project work instead of simple chatbot replies: project swi
 - Persistent mapping from QQ conversation to local session and Codex thread
 - Multiple local project workspaces
 - Native Codex approval flow in QQ
+- Optional Claude Code backend (`claude -p` headless mode)
 - Read-only analysis with `/ask`
 - Writable execution with `/run`
 - Session management with `/session`
@@ -38,8 +39,10 @@ This lets the bridge keep context across messages, isolate projects cleanly, and
 ### Requirements
 
 - Go `1.22+`
-- A working `codex` CLI installation
-- Completed Codex login on the host machine
+- A working `codex` CLI installation (when `bridge.backend=codex`)
+- Completed Codex login on the host machine (when `bridge.backend=codex`)
+- A working `claude` (Claude Code) installation (when `bridge.backend=claude`)
+- Completed Claude Code login on the host machine (when `bridge.backend=claude`)
 - QQ bot `appId` and `clientSecret`
 - Access to the local project directories you want to expose
 
@@ -66,6 +69,7 @@ Minimal example:
   },
   "bridge": {
     "enabled": true,
+    "backend": "codex",
     "accountIds": ["default"],
     "allowAllTargets": false,
     "allowedTargets": [
@@ -86,6 +90,8 @@ Minimal example:
     "writeCodexSandbox": "workspace-write",
     "defaultRunMode": "write",
     "implicitMessageMode": "write",
+    "claudeBinary": "claude",
+    "claudeModel": null,
     "dataDir": "/path/to/qq-codex-go/data",
     "stateFile": "/path/to/qq-codex-go/data/state.json",
     "auditFile": "/path/to/qq-codex-go/data/bridge-audit.jsonl"
@@ -94,6 +100,7 @@ Minimal example:
 ```
 
 > It is strongly recommended to set `dataDir`, `stateFile`, and `auditFile` explicitly.
+> `bridge.backend` is the default backend; you can switch per QQ conversation via `/backend use codex|claude`.
 
 ### 3. Run the bridge
 
@@ -125,6 +132,8 @@ Recommended validation order:
 | --- | --- |
 | `/ping` | Health check |
 | `/help` | Show help |
+| `/backend current` | Show current backend |
+| `/backend use <codex\|claude>` | Switch backend |
 | `/clear` | Start a fresh session |
 | `/mode` | Show current default mode |
 | `/mode write` | Set the current session default to writable execution |

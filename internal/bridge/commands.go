@@ -105,15 +105,17 @@ func BuildHelpText(cfg cfgpkg.BridgeConfig) string {
 	readPrefixes := normalizePrefixes(cfg.ReadOnlyPrefixes, defaultReadOnlyPrefixes)
 	writePrefixes := normalizePrefixes(cfg.WritePrefixes, defaultWritePrefixes)
 	confirmPrefixes := normalizePrefixes(cfg.ConfirmPrefixes, defaultConfirmPrefixes)
-	defaultText := "普通消息 - 直接发给 Codex（默认按当前会话模式执行）"
+	defaultText := "普通消息 - 直接发给当前后端（默认按当前会话模式执行）"
 	if cfg.ImplicitMessageMode == "read" {
-		defaultText = "普通消息 - 直接发给 Codex（默认只读分析）"
+		defaultText = "普通消息 - 直接发给当前后端（默认只读分析）"
 	}
 	return strings.Join([]string{
 		"可用命令：",
 		defaultText,
 		"/ping - 健康检查",
 		"/help - 查看帮助",
+		"/backend current - 查看当前后端（codex/claude）",
+		"/backend use <codex|claude> - 切换后端",
 		"/project list - 查看项目列表",
 		"/project current - 查看当前项目",
 		"/project use <别名> - 切换项目",
@@ -125,9 +127,9 @@ func BuildHelpText(cfg cfgpkg.BridgeConfig) string {
 		"/mode - 查看当前默认执行模式",
 		"/mode write|read - 设置普通消息和 /run 的默认模式",
 		fmt.Sprintf("%s 你的问题 - 只读分析，不改文件", readPrefixes[0]),
-		fmt.Sprintf("%s 你的需求 - 在当前项目执行 Codex", writePrefixes[0]),
+		fmt.Sprintf("%s 你的需求 - 在当前项目执行后端任务", writePrefixes[0]),
 		fmt.Sprintf("%s - 确认执行高风险写操作", confirmPrefixes[0]),
-		"/approve [session] - 同意当前 Codex 原生审批，可选本会话记忆",
-		"/deny - 拒绝当前 Codex 原生审批",
+		"/approve [session] - 同意当前 Codex 原生审批（Codex 后端），可选本会话记忆",
+		"/deny - 拒绝当前 Codex 原生审批（Codex 后端）",
 	}, "\n")
 }

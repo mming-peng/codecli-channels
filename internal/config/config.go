@@ -36,6 +36,7 @@ type Account struct {
 
 type BridgeConfig struct {
 	Enabled              bool                     `json:"enabled"`
+	Backend              string                   `json:"backend"`
 	AccountIDs           []string                 `json:"accountIds"`
 	AllowAllTargets      bool                     `json:"allowAllTargets"`
 	AllowedTargets       []string                 `json:"allowedTargets"`
@@ -51,6 +52,8 @@ type BridgeConfig struct {
 	ReadOnlyCodexSandbox string                   `json:"readOnlyCodexSandbox"`
 	WriteCodexSandbox    string                   `json:"writeCodexSandbox"`
 	CodexModel           string                   `json:"codexModel"`
+	ClaudeBinary         string                   `json:"claudeBinary"`
+	ClaudeModel          string                   `json:"claudeModel"`
 	ConfirmationTTLMS    int                      `json:"confirmationTtlMs"`
 	AuditEnabled         bool                     `json:"auditEnabled"`
 	DefaultRunMode       string                   `json:"defaultRunMode"`
@@ -91,6 +94,15 @@ func (c *Config) Normalize(baseDir string) error {
 	if len(c.Accounts) == 0 {
 		return fmt.Errorf("accounts 不能为空")
 	}
+	if strings.TrimSpace(c.Bridge.Backend) == "" {
+		c.Bridge.Backend = "codex"
+	}
+	c.Bridge.Backend = strings.ToLower(strings.TrimSpace(c.Bridge.Backend))
+	switch c.Bridge.Backend {
+	case "codex", "claude":
+	default:
+		return fmt.Errorf("bridge.backend=%s 不支持（仅支持 codex/claude）", c.Bridge.Backend)
+	}
 	if c.Bridge.QQMaxReplyChars <= 0 {
 		c.Bridge.QQMaxReplyChars = DefaultQQMaxReply
 	}
@@ -108,6 +120,9 @@ func (c *Config) Normalize(baseDir string) error {
 	}
 	if c.Bridge.WriteCodexSandbox == "" {
 		c.Bridge.WriteCodexSandbox = DefaultWriteSandbox
+	}
+	if strings.TrimSpace(c.Bridge.ClaudeBinary) == "" {
+		c.Bridge.ClaudeBinary = "claude"
 	}
 	if c.Bridge.DefaultRunMode == "" {
 		c.Bridge.DefaultRunMode = "write"

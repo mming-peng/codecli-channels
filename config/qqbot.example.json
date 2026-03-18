@@ -15,6 +15,7 @@
   },
   "bridge": {
     "enabled": true,
+    "backend": "codex",
     "accountIds": ["default"],
     "allowAllTargets": false,
     "allowedTargets": [
@@ -41,6 +42,8 @@
     "readOnlyCodexSandbox": "read-only",
     "writeCodexSandbox": "workspace-write",
     "codexModel": null,
+    "claudeBinary": "claude",
+    "claudeModel": null,
     "confirmationTtlMs": 600000,
     "auditEnabled": true,
     "defaultRunMode": "write",

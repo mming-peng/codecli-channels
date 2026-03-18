@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"qq-codex-go/internal/claude"
 	"qq-codex-go/internal/codex"
 	cfgpkg "qq-codex-go/internal/config"
 	"qq-codex-go/internal/qq"
@@ -32,13 +33,14 @@ type nativeApprovalState struct {
 }
 
 type Service struct {
-	cfg      *cfgpkg.Config
-	logger   *slog.Logger
-	store    *store.Store
-	api      *qq.APIClient
-	runner   codex.TurnRunner
-	audit    *AuditLogger
-	gateways map[string]*qq.Gateway
+	cfg          *cfgpkg.Config
+	logger       *slog.Logger
+	store        *store.Store
+	api          *qq.APIClient
+	codexRunner  codex.TurnRunner
+	claudeRunner codex.TurnRunner
+	audit        *AuditLogger
+	gateways     map[string]*qq.Gateway
 
 	mu                   sync.Mutex
 	busy                 map[string]bool
@@ -51,12 +53,15 @@ func NewService(cfg *cfgpkg.Config, logger *slog.Logger) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
+	codexRunner := codex.NewAppServerRunner()
+	claudeRunner := claude.NewRunner(cfg.Bridge.ClaudeBinary)
 	service := &Service{
 		cfg:                  cfg,
 		logger:               logger,
 		store:                stateStore,
 		api:                  qq.NewAPIClient(cfg),
-		runner:               codex.NewAppServerRunner(),
+		codexRunner:          codexRunner,
+		claudeRunner:         claudeRunner,
 		audit:                NewAuditLogger(cfg.Bridge.AuditFile),
 		gateways:             map[string]*qq.Gateway{},
 		busy:                 map[string]bool{},
@@ -94,7 +99,7 @@ func (s *Service) handleMessage(ctx context.Context, msg qq.IncomingMessage) {
 	}
 	if !s.isAllowedTarget(msg) {
 		s.auditIfEnabled(AuditEvent{Status: "rejected", Reason: "target_not_allowed", AccountID: msg.AccountID, ChatType: msg.ChatType, TargetID: msg.TargetID, SenderID: msg.SenderID, Text: msg.Text})
-		s.reply(ctx, msg, "当前目标未放行 Codex 执行，请先在配置里加入白名单。")
+		s.reply(ctx, msg, fmt.Sprintf("当前目标未放行 %s 执行，请先在配置里加入白名单。", backendLabel(s.resolveBackend(msg.ConversationKey()))))
 		return
 	}
 
@@ -102,13 +107,18 @@ func (s *Service) handleMessage(ctx context.Context, msg qq.IncomingMessage) {
 	s.logger.Info("收到 QQ 消息", "accountId", msg.AccountID, "chatType", msg.ChatType, "targetId", msg.TargetID, "senderId", msg.SenderID, "text", trimForLog(text, 200))
 	switch {
 	case text == "/ping":
-		s.reply(ctx, msg, "pong，Go 版 QQ-Codex bridge 在线。")
+		backend := s.resolveBackend(msg.ConversationKey())
+		s.reply(ctx, msg, fmt.Sprintf("pong，Go 版 QQ bridge 在线（后端：%s）。", backendLabel(backend)))
 		return
 	case text == "/help":
-		s.reply(ctx, msg, BuildHelpText(s.cfg.Bridge))
+		backend := s.resolveBackend(msg.ConversationKey())
+		s.reply(ctx, msg, fmt.Sprintf("当前后端：%s\n\n%s", backendLabel(backend), BuildHelpText(s.cfg.Bridge)))
 		return
 	case strings.HasPrefix(text, "/project"):
 		s.handleProjectCommand(ctx, msg)
+		return
+	case strings.HasPrefix(text, "/backend"):
+		s.handleBackendCommand(ctx, msg)
 		return
 	case text == "/clear":
 		s.handleClearCommand(ctx, msg)
@@ -206,6 +216,66 @@ func (s *Service) handleProjectCommand(ctx context.Context, msg qq.IncomingMessa
 	}
 }
 
+func (s *Service) resolveBackend(conversationKey string) string {
+	backend := strings.ToLower(strings.TrimSpace(s.store.GetBackend(conversationKey, s.cfg.Bridge.Backend)))
+	switch backend {
+	case "codex", "claude":
+		return backend
+	default:
+		defaultBackend := strings.ToLower(strings.TrimSpace(s.cfg.Bridge.Backend))
+		if defaultBackend == "claude" {
+			return "claude"
+		}
+		return "codex"
+	}
+}
+
+func (s *Service) handleBackendCommand(ctx context.Context, msg qq.IncomingMessage) {
+	parts := strings.Fields(strings.TrimSpace(msg.Text))
+	conversationKey := msg.ConversationKey()
+
+	current := s.resolveBackend(conversationKey)
+	if len(parts) == 1 {
+		s.reply(ctx, msg, strings.Join([]string{
+			"当前后端：" + backendLabel(current),
+			"可选：codex / claude",
+			"切换：/backend use codex|claude",
+		}, "\n"))
+		return
+	}
+
+	sub := strings.ToLower(strings.TrimSpace(parts[1]))
+	switch sub {
+	case "current":
+		s.reply(ctx, msg, "当前后端："+backendLabel(current))
+		return
+	case "list":
+		s.reply(ctx, msg, "可用后端：\n- codex\n- claude")
+		return
+	case "use", "switch", "set":
+		if len(parts) < 3 {
+			s.reply(ctx, msg, "用法：/backend use codex|claude")
+			return
+		}
+		sub = strings.ToLower(strings.TrimSpace(parts[2]))
+		fallthrough
+	case "codex", "claude":
+		if sub != "codex" && sub != "claude" {
+			s.reply(ctx, msg, "仅支持：codex / claude")
+			return
+		}
+		if err := s.store.SetBackend(conversationKey, sub); err != nil {
+			s.reply(ctx, msg, fmt.Sprintf("切换后端失败：%v", err))
+			return
+		}
+		s.reply(ctx, msg, "已切换后端到："+backendLabel(sub))
+		return
+	default:
+		s.reply(ctx, msg, "支持：/backend current | /backend list | /backend use <codex|claude>")
+		return
+	}
+}
+
 func (s *Service) handleClearCommand(ctx context.Context, msg qq.IncomingMessage) {
 	project := s.resolveCurrentProject(msg.ConversationKey())
 	item, err := s.store.CreateSession(msg.ConversationKey(), project.Alias, project.Path, "session", s.cfg.Bridge.DefaultRunMode)
@@ -240,13 +310,21 @@ func (s *Service) handleSessionCommand(ctx context.Context, msg qq.IncomingMessa
 			if current != nil && current.ID == item.ID {
 				marker = "*"
 			}
-			thread := item.ThreadID
-			if thread == "" {
-				thread = "(尚未绑定 Codex thread)"
-			} else if len(thread) > 18 {
-				thread = thread[:18] + "..."
+			codexThread := item.ThreadID
+			claudeSession := item.ClaudeSessionID
+			if len(codexThread) > 18 {
+				codexThread = codexThread[:18] + "..."
 			}
-			lines = append(lines, fmt.Sprintf("%s %s | %s | %s", marker, item.ID, item.Name, thread))
+			if len(claudeSession) > 18 {
+				claudeSession = claudeSession[:18] + "..."
+			}
+			if codexThread == "" {
+				codexThread = "-"
+			}
+			if claudeSession == "" {
+				claudeSession = "-"
+			}
+			lines = append(lines, fmt.Sprintf("%s %s | %s | codex:%s claude:%s", marker, item.ID, item.Name, codexThread, claudeSession))
 		}
 		s.reply(ctx, msg, strings.Join(lines, "\n"))
 	case "current":
@@ -255,11 +333,15 @@ func (s *Service) handleSessionCommand(ctx context.Context, msg qq.IncomingMessa
 			s.reply(ctx, msg, fmt.Sprintf("读取当前会话失败：%v", err))
 			return
 		}
-		thread := item.ThreadID
-		if thread == "" {
-			thread = "(尚未开始)"
+		codexThread := item.ThreadID
+		claudeSession := item.ClaudeSessionID
+		if codexThread == "" {
+			codexThread = "(尚未开始)"
 		}
-		s.reply(ctx, msg, fmt.Sprintf("当前会话：%s\n名称：%s\n项目：%s\nThread：%s\n默认模式：%s", item.ID, item.Name, item.ProjectAlias, thread, item.DefaultRunMode))
+		if claudeSession == "" {
+			claudeSession = "(尚未开始)"
+		}
+		s.reply(ctx, msg, fmt.Sprintf("当前会话：%s\n名称：%s\n项目：%s\nCodexThread：%s\nClaudeSession：%s\n默认模式：%s", item.ID, item.Name, item.ProjectAlias, codexThread, claudeSession, item.DefaultRunMode))
 	case "new":
 		name := "session"
 		if len(parts) > 2 {
@@ -364,8 +446,17 @@ func (s *Service) executeTask(ctx context.Context, msg qq.IncomingMessage, mode,
 		return
 	}
 
+	backend := s.resolveBackend(conversationKey)
+	runner := s.codexRunner
 	sandbox := s.cfg.Bridge.WriteCodexSandbox
-	if mode == "read" {
+	model := s.cfg.Bridge.CodexModel
+	threadID := session.ThreadID
+	if backend == "claude" {
+		runner = s.claudeRunner
+		sandbox = mode
+		model = s.cfg.Bridge.ClaudeModel
+		threadID = session.ClaudeSessionID
+	} else if mode == "read" {
 		sandbox = s.cfg.Bridge.ReadOnlyCodexSandbox
 	}
 	var streamedFinal string
@@ -386,7 +477,7 @@ func (s *Service) executeTask(ctx context.Context, msg qq.IncomingMessage, mode,
 		case <-notifyDone:
 		}
 	}()
-	result, err := s.runner.RunTurn(ctx, codex.TurnOptions{
+	result, err := runner.RunTurn(ctx, codex.TurnOptions{
 		Prompt:         body,
 		SessionID:      session.ID,
 		ProjectAlias:   project.Alias,
@@ -394,9 +485,9 @@ func (s *Service) executeTask(ctx context.Context, msg qq.IncomingMessage, mode,
 		TargetType:     msg.ChatType,
 		SenderID:       msg.SenderID,
 		TargetID:       msg.TargetID,
-		ThreadID:       session.ThreadID,
+		ThreadID:       threadID,
 		SandboxMode:    sandbox,
-		Model:          s.cfg.Bridge.CodexModel,
+		Model:          model,
 		MaxPromptChars: s.cfg.Bridge.MaxPromptChars,
 		Timeout:        time.Duration(s.cfg.Bridge.CodexTimeoutMs) * time.Millisecond,
 		ProgressHandler: func(event codex.ProgressEvent) {
@@ -444,12 +535,22 @@ func (s *Service) executeTask(ctx context.Context, msg qq.IncomingMessage, mode,
 			}
 		},
 	})
-	if result.ThreadID != "" && result.ThreadID != session.ThreadID {
-		session.ThreadID = result.ThreadID
-		_ = s.store.UpdateSession(session)
+	if result.ThreadID != "" {
+		updated := false
+		if backend == "claude" && result.ThreadID != session.ClaudeSessionID {
+			session.ClaudeSessionID = result.ThreadID
+			updated = true
+		}
+		if backend == "codex" && result.ThreadID != session.ThreadID {
+			session.ThreadID = result.ThreadID
+			updated = true
+		}
+		if updated {
+			_ = s.store.UpdateSession(session)
+		}
 	}
 	s.clearNativeApproval(conversationKey)
-	if mode == "write" && looksLikeNeverPolicyResponse(result.ResponseText, result.CombinedText) && session.ThreadID != "" {
+	if backend == "codex" && mode == "write" && looksLikeNeverPolicyResponse(result.ResponseText, result.CombinedText) && session.ThreadID != "" {
 		oldThread := session.ThreadID
 		session.ThreadID = ""
 		_ = s.store.UpdateSession(session)
@@ -480,6 +581,13 @@ func (s *Service) executeTask(ctx context.Context, msg qq.IncomingMessage, mode,
 	for _, chunk := range splitForQQ(content, s.cfg.Bridge.QQMaxReplyChars) {
 		s.proactive(context.Background(), msg, chunk)
 	}
+}
+
+func backendLabel(backend string) string {
+	if backend == "claude" {
+		return "Claude Code"
+	}
+	return "Codex"
 }
 
 func buildFailureReply(execErr error, result codex.TurnResult, userBody string) string {

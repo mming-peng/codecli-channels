@@ -1,6 +1,6 @@
 # qq-codex-go
 
-把 QQ 变成远程 Codex 工作台。
+把 QQ 变成远程 Codex / Claude Code 工作台。
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
@@ -14,6 +14,7 @@
 - QQ 会话到本地 session 和 Codex thread 的持久映射
 - 多个本地项目工作区
 - QQ 中处理 Codex 原生审批
+- 可选 Claude Code 后端（`claude -p` headless 模式）
 - `/ask` 只读分析
 - `/run` 可写执行
 - `/session` 会话管理
@@ -38,8 +39,10 @@ QQ 会话
 ### 环境要求
 
 - Go `1.22+`
-- 已安装并可用的 `codex` CLI
-- `codex` 已完成登录
+- 已安装并可用的 `codex` CLI（当 `bridge.backend=codex`）
+- `codex` 已完成登录（当 `bridge.backend=codex`）
+- 已安装并可用的 `claude`（Claude Code CLI，当 `bridge.backend=claude`）
+- Claude Code 已完成登录（当 `bridge.backend=claude`）
 - QQ 机器人 `appId` / `clientSecret`
 - 能访问你要暴露的本地项目目录
 
@@ -66,6 +69,7 @@ cp config/qqbot.example.json config/qqbot.json
   },
   "bridge": {
     "enabled": true,
+    "backend": "codex",
     "accountIds": ["default"],
     "allowAllTargets": false,
     "allowedTargets": [
@@ -86,6 +90,8 @@ cp config/qqbot.example.json config/qqbot.json
     "writeCodexSandbox": "workspace-write",
     "defaultRunMode": "write",
     "implicitMessageMode": "write",
+    "claudeBinary": "claude",
+    "claudeModel": null,
     "dataDir": "/path/to/qq-codex-go/data",
     "stateFile": "/path/to/qq-codex-go/data/state.json",
     "auditFile": "/path/to/qq-codex-go/data/bridge-audit.jsonl"
@@ -94,6 +100,7 @@ cp config/qqbot.example.json config/qqbot.json
 ```
 
 > 强烈建议显式设置 `dataDir`、`stateFile`、`auditFile`。
+> `bridge.backend` 是默认后端；也可以在 QQ 里用 `/backend use codex|claude` 按会话切换。
 
 ### 3. 启动 bridge
 
@@ -125,6 +132,8 @@ go build -o ./bin/qq-codex-go ./cmd/qq-codex-go
 | --- | --- |
 | `/ping` | 健康检查 |
 | `/help` | 查看帮助 |
+| `/backend current` | 查看当前后端 |
+| `/backend use <codex\|claude>` | 切换后端 |
 | `/clear` | 开一个新会话 |
 | `/mode` | 查看当前默认模式 |
 | `/mode write` | 把当前会话默认模式切到可写执行 |
