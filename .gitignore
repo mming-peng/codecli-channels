@@ -3,6 +3,8 @@
 .tmp/
 logs/
 .DS_Store
+.idea/
+docs/
 
 config/qqbot.json
 config/config/data/
