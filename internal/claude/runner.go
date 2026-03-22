@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"qq-codex-go/internal/codex"
+	"codecli-channels/internal/codex"
 )
 
 type Runner struct {
@@ -166,7 +166,7 @@ func prepareScopedClaudeConfigDir(projectPath, scope string) (string, error) {
 		hashInput = projectPath + "\n" + scope
 	}
 	hash := sha1.Sum([]byte(hashInput))
-	runtimeDir := filepath.Join(os.TempDir(), "qq-codex-go-claude-config", hex.EncodeToString(hash[:8]))
+	runtimeDir := filepath.Join(os.TempDir(), "codecli-channels-claude-config", hex.EncodeToString(hash[:8]))
 	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
 		return "", err
 	}

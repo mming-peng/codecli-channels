@@ -15,17 +15,19 @@ const (
 	DefaultReadSandbox    = "read-only"
 	DefaultWriteSandbox   = "workspace-write"
 	DangerSandbox         = "danger-full-access"
-	DefaultQQMaxReply     = 1500
+	DefaultMaxReplyChars  = 1500
+	DefaultQQMaxReply     = DefaultMaxReplyChars
 	DefaultMaxPromptChars = 4000
 	DefaultTimeoutMs      = 600000
 	DefaultConfirmTTLMS   = 600000
 )
 
 type Config struct {
-	DefaultAccountID string             `json:"defaultAccountId"`
-	DefaultTimezone  string             `json:"defaultTimezone"`
-	Accounts         map[string]Account `json:"accounts"`
-	Bridge           BridgeConfig       `json:"bridge"`
+	DefaultAccountID string                   `json:"defaultAccountId"`
+	DefaultTimezone  string                   `json:"defaultTimezone"`
+	Accounts         map[string]Account       `json:"accounts"`
+	Channels         map[string]ChannelConfig `json:"channels"`
+	Bridge           BridgeConfig             `json:"bridge"`
 }
 
 type Account struct {
@@ -34,12 +36,21 @@ type Account struct {
 	ClientSecret string `json:"clientSecret"`
 }
 
+type ChannelConfig struct {
+	Alias   string         `json:"-"`
+	Type    string         `json:"type"`
+	Enabled bool           `json:"enabled"`
+	Options map[string]any `json:"options"`
+}
+
 type BridgeConfig struct {
 	Enabled              bool                     `json:"enabled"`
 	Backend              string                   `json:"backend"`
 	AccountIDs           []string                 `json:"accountIds"`
+	ChannelIDs           []string                 `json:"channelIds"`
 	AllowAllTargets      bool                     `json:"allowAllTargets"`
 	AllowedTargets       []string                 `json:"allowedTargets"`
+	AllowedScopes        []string                 `json:"allowedScopes"`
 	RequireCommandPrefix bool                     `json:"requireCommandPrefix"`
 	ReadOnlyPrefixes     []string                 `json:"readOnlyPrefixes"`
 	WritePrefixes        []string                 `json:"writePrefixes"`
@@ -47,6 +58,7 @@ type BridgeConfig struct {
 	Projects             map[string]ProjectConfig `json:"projects"`
 	DefaultProject       string                   `json:"defaultProject"`
 	CodexTimeoutMs       int                      `json:"codexTimeoutMs"`
+	MaxReplyChars        int                      `json:"maxReplyChars"`
 	QQMaxReplyChars      int                      `json:"qqMaxReplyChars"`
 	MaxPromptChars       int                      `json:"maxPromptChars"`
 	ReadOnlyCodexSandbox string                   `json:"readOnlyCodexSandbox"`
@@ -91,9 +103,10 @@ func (c *Config) Normalize(baseDir string) error {
 	if c.DefaultTimezone == "" {
 		c.DefaultTimezone = DefaultTimezone
 	}
-	if len(c.Accounts) == 0 {
-		return fmt.Errorf("accounts 不能为空")
+	if len(c.Accounts) == 0 && len(c.Channels) == 0 {
+		return fmt.Errorf("accounts 或 channels 不能为空")
 	}
+	c.normalizeLegacyChannels()
 	if strings.TrimSpace(c.Bridge.Backend) == "" {
 		c.Bridge.Backend = "codex"
 	}
@@ -103,9 +116,14 @@ func (c *Config) Normalize(baseDir string) error {
 	default:
 		return fmt.Errorf("bridge.backend=%s 不支持（仅支持 codex/claude）", c.Bridge.Backend)
 	}
-	if c.Bridge.QQMaxReplyChars <= 0 {
-		c.Bridge.QQMaxReplyChars = DefaultQQMaxReply
+	if c.Bridge.MaxReplyChars <= 0 {
+		if c.Bridge.QQMaxReplyChars > 0 {
+			c.Bridge.MaxReplyChars = c.Bridge.QQMaxReplyChars
+		} else {
+			c.Bridge.MaxReplyChars = DefaultMaxReplyChars
+		}
 	}
+	c.Bridge.QQMaxReplyChars = c.Bridge.MaxReplyChars
 	if c.Bridge.MaxPromptChars <= 0 {
 		c.Bridge.MaxPromptChars = DefaultMaxPromptChars
 	}
@@ -142,8 +160,28 @@ func (c *Config) Normalize(baseDir string) error {
 	}
 	c.Bridge.StateFile = absPath(baseDir, c.Bridge.StateFile)
 	c.Bridge.AuditFile = absPath(baseDir, c.Bridge.AuditFile)
-	if len(c.Bridge.AccountIDs) == 0 {
+	if len(c.Bridge.AccountIDs) == 0 && len(c.Bridge.ChannelIDs) == 0 {
 		c.Bridge.AccountIDs = []string{c.DefaultAccountID}
+	}
+	if len(c.Bridge.ChannelIDs) == 0 {
+		c.Bridge.ChannelIDs = append([]string(nil), c.Bridge.AccountIDs...)
+	}
+	if len(c.Bridge.AllowedScopes) == 0 && len(c.Bridge.AllowedTargets) > 0 {
+		c.Bridge.AllowedScopes = append([]string(nil), c.Bridge.AllowedTargets...)
+	}
+	if c.Channels == nil {
+		c.Channels = map[string]ChannelConfig{}
+	}
+	for alias, channel := range c.Channels {
+		channel.Alias = alias
+		channel.Type = strings.ToLower(strings.TrimSpace(channel.Type))
+		if channel.Type == "" {
+			return fmt.Errorf("channel %s 缺少 type", alias)
+		}
+		if channel.Options == nil {
+			channel.Options = map[string]any{}
+		}
+		c.Channels[alias] = channel
 	}
 	for alias, project := range c.Bridge.Projects {
 		project.Alias = alias
@@ -168,6 +206,24 @@ func (c *Config) Normalize(baseDir string) error {
 	return nil
 }
 
+func (c *Config) normalizeLegacyChannels() {
+	if len(c.Channels) > 0 {
+		return
+	}
+	c.Channels = make(map[string]ChannelConfig, len(c.Accounts))
+	for alias, account := range c.Accounts {
+		c.Channels[alias] = ChannelConfig{
+			Alias:   alias,
+			Type:    "qq",
+			Enabled: account.Enabled,
+			Options: map[string]any{
+				"appId":        account.AppID,
+				"clientSecret": account.ClientSecret,
+			},
+		}
+	}
+}
+
 func absPath(baseDir, value string) string {
 	if value == "" {
 		return value
@@ -190,6 +246,11 @@ func (c *Config) ResolveAccount(accountID string) (Account, error) {
 		return Account{}, fmt.Errorf("账号 %s 缺少 appId/clientSecret", accountID)
 	}
 	return account, nil
+}
+
+func (c *Config) Channel(alias string) (ChannelConfig, bool) {
+	channel, ok := c.Channels[alias]
+	return channel, ok
 }
 
 func (c *Config) ProjectList() []ProjectConfig {

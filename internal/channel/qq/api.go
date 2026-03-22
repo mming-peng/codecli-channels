@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	cfgpkg "qq-codex-go/internal/config"
+	cfgpkg "codecli-channels/internal/config"
 )
 
 const (
@@ -22,7 +22,7 @@ const (
 )
 
 type IncomingMessage struct {
-	AccountID string
+	ChannelID string
 	ChatType  string
 	TargetID  string
 	SenderID  string
@@ -32,7 +32,7 @@ type IncomingMessage struct {
 }
 
 func (m IncomingMessage) ConversationKey() string {
-	return m.AccountID + ":" + m.ChatType + ":" + m.TargetID
+	return m.ChannelID + ":" + m.ChatType + ":" + m.TargetID
 }
 
 type APIClient struct {
@@ -60,13 +60,13 @@ func NewAPIClient(cfg *cfgpkg.Config) *APIClient {
 	}
 }
 
-func (c *APIClient) GetAccessToken(ctx context.Context, accountID string) (string, error) {
-	account, err := c.cfg.ResolveAccount(accountID)
+func (c *APIClient) GetAccessToken(ctx context.Context, channelID string) (string, error) {
+	appID, clientSecret, err := c.resolveCredentials(channelID)
 	if err != nil {
 		return "", err
 	}
 	c.mu.Lock()
-	cached, ok := c.tokens[accountID]
+	cached, ok := c.tokens[channelID]
 	if ok && cached.ExpiresAt.After(time.Now().Add(1*time.Minute)) {
 		c.mu.Unlock()
 		return cached.Token, nil
@@ -74,8 +74,8 @@ func (c *APIClient) GetAccessToken(ctx context.Context, accountID string) (strin
 	c.mu.Unlock()
 
 	payload := map[string]string{
-		"appId":        account.AppID,
-		"clientSecret": account.ClientSecret,
+		"appId":        appID,
+		"clientSecret": clientSecret,
 	}
 	var resp tokenResponse
 	if err := c.doJSON(ctx, http.MethodPost, tokenURL, "", payload, &resp); err != nil {
@@ -89,13 +89,13 @@ func (c *APIClient) GetAccessToken(ctx context.Context, accountID string) (strin
 		expiresIn = 7200
 	}
 	c.mu.Lock()
-	c.tokens[accountID] = tokenInfo{Token: resp.AccessToken, ExpiresAt: time.Now().Add(time.Duration(expiresIn) * time.Second)}
+	c.tokens[channelID] = tokenInfo{Token: resp.AccessToken, ExpiresAt: time.Now().Add(time.Duration(expiresIn) * time.Second)}
 	c.mu.Unlock()
 	return resp.AccessToken, nil
 }
 
-func (c *APIClient) GetGatewayURL(ctx context.Context, accountID string) (string, error) {
-	token, err := c.GetAccessToken(ctx, accountID)
+func (c *APIClient) GetGatewayURL(ctx context.Context, channelID string) (string, error) {
+	token, err := c.GetAccessToken(ctx, channelID)
 	if err != nil {
 		return "", err
 	}
@@ -111,8 +111,8 @@ func (c *APIClient) GetGatewayURL(ctx context.Context, accountID string) (string
 	return resp.URL, nil
 }
 
-func (c *APIClient) ReplyMessage(ctx context.Context, accountID, targetType, targetID, msgID, content string) error {
-	token, err := c.GetAccessToken(ctx, accountID)
+func (c *APIClient) ReplyMessage(ctx context.Context, channelID, targetType, targetID, msgID, content string) error {
+	token, err := c.GetAccessToken(ctx, channelID)
 	if err != nil {
 		return err
 	}
@@ -125,8 +125,8 @@ func (c *APIClient) ReplyMessage(ctx context.Context, accountID, targetType, tar
 	return c.doJSON(ctx, http.MethodPost, apiBase+messagePath(targetType, targetID), token, body, nil)
 }
 
-func (c *APIClient) ProactiveMessage(ctx context.Context, accountID, targetType, targetID, content string) error {
-	token, err := c.GetAccessToken(ctx, accountID)
+func (c *APIClient) ProactiveMessage(ctx context.Context, channelID, targetType, targetID, content string) error {
+	token, err := c.GetAccessToken(ctx, channelID)
 	if err != nil {
 		return err
 	}
@@ -135,6 +135,19 @@ func (c *APIClient) ProactiveMessage(ctx context.Context, accountID, targetType,
 		"msg_type": 0,
 	}
 	return c.doJSON(ctx, http.MethodPost, apiBase+messagePath(targetType, targetID), token, body, nil)
+}
+
+func (c *APIClient) resolveCredentials(channelID string) (string, string, error) {
+	channel, ok := c.cfg.Channel(channelID)
+	if !ok {
+		return "", "", fmt.Errorf("未找到 QQ channel %s", channelID)
+	}
+	appID, _ := channel.Options["appId"].(string)
+	clientSecret, _ := channel.Options["clientSecret"].(string)
+	if strings.TrimSpace(appID) == "" || strings.TrimSpace(clientSecret) == "" {
+		return "", "", fmt.Errorf("QQ channel %s 缺少 appId/clientSecret", channelID)
+	}
+	return appID, clientSecret, nil
 }
 
 func (c *APIClient) doJSON(ctx context.Context, method, url, token string, payload any, out any) error {

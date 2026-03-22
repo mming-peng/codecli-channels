@@ -2,20 +2,20 @@
 
 ## Overview
 
-`qq-codex-go` maps an incoming QQ conversation to a persistent local execution context:
+`codecli-channels` currently maps an incoming channel conversation to a persistent local execution context:
 
 ```text
-QQ conversation
+Channel Driver
   -> project
   -> bridge session
   -> Codex thread
 ```
 
-This allows the bridge to preserve continuity, isolate projects, and route approvals back to the right QQ context.
+This allows the bridge to preserve continuity, isolate projects, and route approvals back to the right channel context.
 
 ## Main Components
 
-- `internal/qq/`: QQ API client and gateway handling
+- `internal/channel/`: channel abstractions, registry, and driver implementations
 - `internal/bridge/`: orchestration, commands, approvals, and reply behavior
 - `internal/codex/`: transport layer for Codex integration
 - `internal/store/`: local state and session persistence
@@ -45,7 +45,7 @@ There are two approval layers:
 1. Bridge-level confirmation for obviously dangerous tasks
 2. Native Codex approval during actual execution
 
-QQ messages such as `/approve`, `/approve session`, and `/deny` are mapped back to Codex approval decisions.
+Chat messages such as `/approve`, `/approve session`, and `/deny` are mapped back to Codex approval decisions.
 
 ## Response Flow
 

@@ -6,17 +6,26 @@ Check:
 
 - the process is still running
 - the log contains `QQ 网关 READY`
-- the target `openid` or `group_openid` is present in `allowedTargets`
+- the target scope is present in `allowedScopes` (or `allowedTargets` if you still use legacy config)
 - the `appId` and `clientSecret` are valid
 
 ## `/ping` works but normal tasks do not
 
 Check:
 
+- current overall state with `/status`
 - current project selection with `/project current`
 - current session with `/session current`
 - whether the session is bound to an unexpected thread
 - whether the bridge process logged the incoming QQ message
+
+## A task keeps running but you want to change direction
+
+Try:
+
+- `/status` to confirm whether the conversation is still busy
+- `/stop` to interrupt the current task
+- `/history` to confirm what the bridge actually finished before you retry
 
 ## Approval does not show up in QQ
 
@@ -27,9 +36,17 @@ Check whether the task triggered:
 
 Then inspect logs for proactive message sending and approval-related bridge activity.
 
+## Session state feels confusing
+
+Use:
+
+- `/status` for the current project/session/mode snapshot
+- `/session list` for recent task summaries per session
+- `/history` for recent task records across the current project
+
 ## State files are in an unexpected location
 
-Set these explicitly in `qqbot.json`:
+Set these explicitly in `codecli-channels.json` (or legacy `qqbot.json`):
 
 - `bridge.dataDir`
 - `bridge.stateFile`

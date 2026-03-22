@@ -4,17 +4,21 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"qq-codex-go/internal/claude"
-	"qq-codex-go/internal/codex"
-	cfgpkg "qq-codex-go/internal/config"
-	"qq-codex-go/internal/qq"
-	"qq-codex-go/internal/store"
+	channelpkg "codecli-channels/internal/channel"
+	channelfeishu "codecli-channels/internal/channel/feishu"
+	channelqq "codecli-channels/internal/channel/qq"
+	channelweixin "codecli-channels/internal/channel/weixin"
+	"codecli-channels/internal/claude"
+	"codecli-channels/internal/codex"
+	cfgpkg "codecli-channels/internal/config"
+	"codecli-channels/internal/store"
 )
 
 type PendingTask struct {
@@ -36,14 +40,14 @@ type Service struct {
 	cfg          *cfgpkg.Config
 	logger       *slog.Logger
 	store        *store.Store
-	api          *qq.APIClient
+	drivers      map[string]channelpkg.Driver
 	codexRunner  codex.TurnRunner
 	claudeRunner codex.TurnRunner
 	audit        *AuditLogger
-	gateways     map[string]*qq.Gateway
 
 	mu                   sync.Mutex
 	busy                 map[string]bool
+	runningTasks         map[string]*runningTaskState
 	pendingConfirmations map[string]PendingTask
 	nativeApprovals      map[string]*nativeApprovalState
 }
@@ -55,64 +59,111 @@ func NewService(cfg *cfgpkg.Config, logger *slog.Logger) (*Service, error) {
 	}
 	codexRunner := codex.NewAppServerRunner()
 	claudeRunner := claude.NewRunner(cfg.Bridge.ClaudeBinary)
+	registry := channelpkg.NewRegistry()
+	channelfeishu.Register(registry, cfg, logger)
+	channelqq.Register(registry, cfg, logger)
+	channelweixin.Register(registry, cfg, logger)
 	service := &Service{
 		cfg:                  cfg,
 		logger:               logger,
 		store:                stateStore,
-		api:                  qq.NewAPIClient(cfg),
+		drivers:              map[string]channelpkg.Driver{},
 		codexRunner:          codexRunner,
 		claudeRunner:         claudeRunner,
 		audit:                NewAuditLogger(cfg.Bridge.AuditFile),
-		gateways:             map[string]*qq.Gateway{},
 		busy:                 map[string]bool{},
+		runningTasks:         map[string]*runningTaskState{},
 		pendingConfirmations: map[string]PendingTask{},
 		nativeApprovals:      map[string]*nativeApprovalState{},
 	}
-	for _, accountID := range cfg.Bridge.AccountIDs {
-		account, err := cfg.ResolveAccount(accountID)
+	for _, channelID := range cfg.Bridge.ChannelIDs {
+		channelCfg, ok := cfg.Channel(channelID)
+		if !ok {
+			return nil, fmt.Errorf("未找到 channel %s", channelID)
+		}
+		if !channelCfg.Enabled {
+			continue
+		}
+		driver, err := registry.Build(channelID, channelCfg, filepath.Join(cfg.Bridge.DataDir, "channel-state", channelID))
 		if err != nil {
 			return nil, err
 		}
-		if !account.Enabled {
-			continue
-		}
-		service.gateways[accountID] = qq.NewGateway(cfg, service.api, accountID, logger.With("accountId", accountID), service.handleMessage)
+		service.drivers[channelID] = driver
 	}
-	if len(service.gateways) == 0 {
-		return nil, fmt.Errorf("没有可启动的 QQ 账号")
+	if len(service.drivers) == 0 {
+		return nil, fmt.Errorf("没有可启动的 channel 实例")
 	}
 	return service, nil
 }
 
 func (s *Service) Start(ctx context.Context) error {
-	for accountID, gateway := range s.gateways {
-		s.logger.Info("启动 QQ 网关", "accountId", accountID)
-		gateway.Start(ctx)
+	for channelID, driver := range s.drivers {
+		s.logger.Info("启动 channel driver", "channelId", channelID, "platform", driver.Platform())
+		if err := driver.Start(ctx, s.handleMessage); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func (s *Service) handleMessage(ctx context.Context, msg qq.IncomingMessage) {
+func conversationKeyFromMessage(msg channelpkg.Message) string {
+	return strings.TrimSpace(msg.Scope.Key)
+}
+
+func messageTargetType(msg channelpkg.Message) string {
+	if value := strings.TrimSpace(msg.Metadata["chatType"]); value != "" {
+		return value
+	}
+	if msg.Scope.Kind == "dm" {
+		return "user"
+	}
+	return msg.Scope.Kind
+}
+
+func messageTargetID(msg channelpkg.Message) string {
+	if value := strings.TrimSpace(msg.Metadata["targetId"]); value != "" {
+		return value
+	}
+	return strings.TrimSpace(msg.Scope.Key)
+}
+
+func messageSenderID(msg channelpkg.Message) string {
+	if value := strings.TrimSpace(msg.Sender.ID); value != "" {
+		return value
+	}
+	return strings.TrimSpace(msg.Metadata["senderId"])
+}
+
+func (s *Service) handleMessage(ctx context.Context, msg channelpkg.Message) {
 	if strings.TrimSpace(msg.Text) == "" {
 		s.reply(ctx, msg, "我收到了空消息，换个说法试试？")
 		return
 	}
 	if !s.isAllowedTarget(msg) {
-		s.auditIfEnabled(AuditEvent{Status: "rejected", Reason: "target_not_allowed", AccountID: msg.AccountID, ChatType: msg.ChatType, TargetID: msg.TargetID, SenderID: msg.SenderID, Text: msg.Text})
-		s.reply(ctx, msg, fmt.Sprintf("当前目标未放行 %s 执行，请先在配置里加入白名单。", backendLabel(s.resolveBackend(msg.ConversationKey()))))
+		s.auditIfEnabled(AuditEvent{Status: "rejected", Reason: "target_not_allowed", AccountID: msg.ChannelID, ChatType: messageTargetType(msg), TargetID: messageTargetID(msg), SenderID: messageSenderID(msg), Text: msg.Text})
+		s.reply(ctx, msg, fmt.Sprintf("当前目标未放行 %s 执行，请先在配置里加入白名单。", backendLabel(s.resolveBackend(conversationKeyFromMessage(msg)))))
 		return
 	}
 
 	text := strings.TrimSpace(msg.Text)
-	s.logger.Info("收到 QQ 消息", "accountId", msg.AccountID, "chatType", msg.ChatType, "targetId", msg.TargetID, "senderId", msg.SenderID, "text", trimForLog(text, 200))
+	s.logger.Info("收到 channel 消息", "channelId", msg.ChannelID, "platform", msg.Platform, "scope", msg.Scope.Key, "senderId", messageSenderID(msg), "text", trimForLog(text, 200))
 	switch {
 	case text == "/ping":
-		backend := s.resolveBackend(msg.ConversationKey())
-		s.reply(ctx, msg, fmt.Sprintf("pong，Go 版 QQ bridge 在线（后端：%s）。", backendLabel(backend)))
+		backend := s.resolveBackend(conversationKeyFromMessage(msg))
+		s.reply(ctx, msg, fmt.Sprintf("pong，codecli-channels 在线（当前平台：%s，后端：%s）。", strings.ToUpper(msg.Platform), backendLabel(backend)))
 		return
 	case text == "/help":
-		backend := s.resolveBackend(msg.ConversationKey())
+		backend := s.resolveBackend(conversationKeyFromMessage(msg))
 		s.reply(ctx, msg, fmt.Sprintf("当前后端：%s\n\n%s", backendLabel(backend), BuildHelpText(s.cfg.Bridge)))
+		return
+	case text == "/status":
+		s.handleStatusCommand(ctx, msg)
+		return
+	case text == "/stop":
+		s.handleStopCommand(ctx, msg)
+		return
+	case text == "/history":
+		s.handleHistoryCommand(ctx, msg)
 		return
 	case strings.HasPrefix(text, "/project"):
 		s.handleProjectCommand(ctx, msg)
@@ -170,34 +221,22 @@ func (s *Service) handleMessage(ctx context.Context, msg qq.IncomingMessage) {
 	s.dispatchTask(ctx, msg, parsed.Mode, parsed.Body, false)
 }
 
-func (s *Service) handleProjectCommand(ctx context.Context, msg qq.IncomingMessage) {
+func (s *Service) handleProjectCommand(ctx context.Context, msg channelpkg.Message) {
 	parts := strings.Fields(strings.TrimSpace(msg.Text))
 	subcommand := "list"
 	if len(parts) > 1 {
 		subcommand = strings.ToLower(parts[1])
 	}
-	conversationKey := msg.ConversationKey()
+	conversationKey := conversationKeyFromMessage(msg)
 	current := s.resolveCurrentProject(conversationKey)
 	switch subcommand {
 	case "list":
-		lines := []string{"可用项目："}
-		for _, project := range s.cfg.ProjectList() {
-			marker := "-"
-			if current.Alias == project.Alias {
-				marker = "*"
-			}
-			line := fmt.Sprintf("%s %s -> %s", marker, project.Alias, project.Path)
-			if project.Description != "" {
-				line += " (" + project.Description + ")"
-			}
-			lines = append(lines, line)
-		}
-		s.reply(ctx, msg, strings.Join(lines, "\n"))
+		s.reply(ctx, msg, buildProjectListText(s.cfg.ProjectList(), current.Alias))
 	case "current":
 		s.reply(ctx, msg, fmt.Sprintf("当前项目：%s\n目录：%s", current.Alias, current.Path))
 	case "use", "switch":
 		if len(parts) < 3 {
-			s.reply(ctx, msg, "请提供项目别名，例如：/project use qq-codex-go")
+			s.reply(ctx, msg, "请提供项目别名，例如：/project use codecli-channels")
 			return
 		}
 		project, ok := s.cfg.Project(parts[2])
@@ -209,7 +248,7 @@ func (s *Service) handleProjectCommand(ctx context.Context, msg qq.IncomingMessa
 			s.reply(ctx, msg, fmt.Sprintf("切换项目失败：%v", err))
 			return
 		}
-		s.auditIfEnabled(AuditEvent{Status: "project_switched", AccountID: msg.AccountID, ChatType: msg.ChatType, TargetID: msg.TargetID, SenderID: msg.SenderID, ProjectAlias: project.Alias, ProjectPath: project.Path})
+		s.auditIfEnabled(AuditEvent{Status: "project_switched", AccountID: msg.ChannelID, ChatType: messageTargetType(msg), TargetID: messageTargetID(msg), SenderID: messageSenderID(msg), ProjectAlias: project.Alias, ProjectPath: project.Path})
 		s.reply(ctx, msg, fmt.Sprintf("已切换项目到 %s\n目录：%s", project.Alias, project.Path))
 	default:
 		s.reply(ctx, msg, "支持：/project list | /project current | /project use <别名>")
@@ -230,9 +269,9 @@ func (s *Service) resolveBackend(conversationKey string) string {
 	}
 }
 
-func (s *Service) handleBackendCommand(ctx context.Context, msg qq.IncomingMessage) {
+func (s *Service) handleBackendCommand(ctx context.Context, msg channelpkg.Message) {
 	parts := strings.Fields(strings.TrimSpace(msg.Text))
-	conversationKey := msg.ConversationKey()
+	conversationKey := conversationKeyFromMessage(msg)
 
 	current := s.resolveBackend(conversationKey)
 	if len(parts) == 1 {
@@ -276,57 +315,36 @@ func (s *Service) handleBackendCommand(ctx context.Context, msg qq.IncomingMessa
 	}
 }
 
-func (s *Service) handleClearCommand(ctx context.Context, msg qq.IncomingMessage) {
-	project := s.resolveCurrentProject(msg.ConversationKey())
-	item, err := s.store.CreateSession(msg.ConversationKey(), project.Alias, project.Path, "session", s.cfg.Bridge.DefaultRunMode)
+func (s *Service) handleClearCommand(ctx context.Context, msg channelpkg.Message) {
+	conversationKey := conversationKeyFromMessage(msg)
+	project := s.resolveCurrentProject(conversationKey)
+	item, err := s.store.CreateSession(conversationKey, project.Alias, project.Path, "session", s.cfg.Bridge.DefaultRunMode)
 	if err != nil {
 		s.reply(ctx, msg, fmt.Sprintf("开启新会话失败：%v", err))
 		return
 	}
-	s.clearPendingConfirmation(msg.ConversationKey())
-	s.clearNativeApproval(msg.ConversationKey())
+	s.clearPendingConfirmation(conversationKey)
+	s.clearNativeApproval(conversationKey)
 	s.reply(ctx, msg, fmt.Sprintf("已开启新会话：%s (%s)\n项目：%s", item.Name, item.ID, project.Alias))
 }
 
-func (s *Service) handleSessionCommand(ctx context.Context, msg qq.IncomingMessage) {
+func (s *Service) handleSessionCommand(ctx context.Context, msg channelpkg.Message) {
 	parts := strings.Fields(strings.TrimSpace(msg.Text))
 	subcommand := "list"
 	if len(parts) > 1 {
 		subcommand = strings.ToLower(parts[1])
 	}
-	project := s.resolveCurrentProject(msg.ConversationKey())
-	conversationKey := msg.ConversationKey()
+	conversationKey := conversationKeyFromMessage(msg)
+	project := s.resolveCurrentProject(conversationKey)
 	switch subcommand {
 	case "list":
 		items := s.store.ListSessions(conversationKey, project.Alias)
-		if len(items) == 0 {
-			s.reply(ctx, msg, "当前项目下还没有会话，先发一条普通消息或 /run 即可自动创建。")
-			return
-		}
 		current := s.store.CurrentSession(conversationKey, project.Alias)
-		lines := []string{fmt.Sprintf("项目 %s 的会话：", project.Alias)}
-		for _, item := range items {
-			marker := "-"
-			if current != nil && current.ID == item.ID {
-				marker = "*"
-			}
-			codexThread := item.ThreadID
-			claudeSession := item.ClaudeSessionID
-			if len(codexThread) > 18 {
-				codexThread = codexThread[:18] + "..."
-			}
-			if len(claudeSession) > 18 {
-				claudeSession = claudeSession[:18] + "..."
-			}
-			if codexThread == "" {
-				codexThread = "-"
-			}
-			if claudeSession == "" {
-				claudeSession = "-"
-			}
-			lines = append(lines, fmt.Sprintf("%s %s | %s | codex:%s claude:%s", marker, item.ID, item.Name, codexThread, claudeSession))
+		currentID := ""
+		if current != nil {
+			currentID = current.ID
 		}
-		s.reply(ctx, msg, strings.Join(lines, "\n"))
+		s.reply(ctx, msg, buildSessionListText(project.Alias, items, currentID))
 	case "current":
 		item, err := s.store.GetOrCreateActiveSession(conversationKey, project.Alias, project.Path, s.cfg.Bridge.DefaultRunMode)
 		if err != nil {
@@ -341,7 +359,15 @@ func (s *Service) handleSessionCommand(ctx context.Context, msg qq.IncomingMessa
 		if claudeSession == "" {
 			claudeSession = "(尚未开始)"
 		}
-		s.reply(ctx, msg, fmt.Sprintf("当前会话：%s\n名称：%s\n项目：%s\nCodexThread：%s\nClaudeSession：%s\n默认模式：%s", item.ID, item.Name, item.ProjectAlias, codexThread, claudeSession, item.DefaultRunMode))
+		lastSummary := item.LastTaskSummary
+		if lastSummary == "" {
+			lastSummary = "(暂无)"
+		}
+		lastStatus := item.LastTaskStatus
+		if lastStatus == "" {
+			lastStatus = "(暂无)"
+		}
+		s.reply(ctx, msg, fmt.Sprintf("当前会话：%s\n名称：%s\n项目：%s\nCodexThread：%s\nClaudeSession：%s\n默认模式：%s\n最近任务：%s | %s", item.ID, item.Name, item.ProjectAlias, codexThread, claudeSession, item.DefaultRunMode, lastStatus, lastSummary))
 	case "new":
 		name := "session"
 		if len(parts) > 2 {
@@ -369,10 +395,11 @@ func (s *Service) handleSessionCommand(ctx context.Context, msg qq.IncomingMessa
 	}
 }
 
-func (s *Service) handleModeCommand(ctx context.Context, msg qq.IncomingMessage) {
+func (s *Service) handleModeCommand(ctx context.Context, msg channelpkg.Message) {
 	parts := strings.Fields(strings.TrimSpace(msg.Text))
-	project := s.resolveCurrentProject(msg.ConversationKey())
-	session, err := s.store.GetOrCreateActiveSession(msg.ConversationKey(), project.Alias, project.Path, s.cfg.Bridge.DefaultRunMode)
+	conversationKey := conversationKeyFromMessage(msg)
+	project := s.resolveCurrentProject(conversationKey)
+	session, err := s.store.GetOrCreateActiveSession(conversationKey, project.Alias, project.Path, s.cfg.Bridge.DefaultRunMode)
 	if err != nil {
 		s.reply(ctx, msg, fmt.Sprintf("读取会话失败：%v", err))
 		return
@@ -394,50 +421,85 @@ func (s *Service) handleModeCommand(ctx context.Context, msg qq.IncomingMessage)
 	s.reply(ctx, msg, fmt.Sprintf("已将当前会话默认执行模式切换为 %s", mode))
 }
 
-func (s *Service) handleConfirm(ctx context.Context, msg qq.IncomingMessage) {
-	pending, ok := s.getPendingConfirmation(msg.ConversationKey())
+func (s *Service) handleStatusCommand(ctx context.Context, msg channelpkg.Message) {
+	s.reply(ctx, msg, s.buildConversationStatus(ctx, conversationKeyFromMessage(msg)))
+}
+
+func (s *Service) handleStopCommand(ctx context.Context, msg channelpkg.Message) {
+	state, ok := s.stopRunningTask(conversationKeyFromMessage(msg))
+	if !ok {
+		s.reply(ctx, msg, "当前没有正在执行的任务。")
+		return
+	}
+	s.reply(ctx, msg, fmt.Sprintf("已发送停止请求：%s", fallbackText(state.Summary, "当前任务")))
+}
+
+func (s *Service) handleHistoryCommand(ctx context.Context, msg channelpkg.Message) {
+	project := s.resolveCurrentProject(conversationKeyFromMessage(msg))
+	events, err := s.audit.ReadRecent(30)
+	if err != nil {
+		s.reply(ctx, msg, fmt.Sprintf("读取最近任务失败：%v", err))
+		return
+	}
+	filtered := make([]AuditEvent, 0, len(events))
+	for _, event := range events {
+		if event.ProjectAlias != project.Alias {
+			continue
+		}
+		switch event.Status {
+		case "success", "failed", "stopped", "awaiting_confirm":
+			filtered = append(filtered, event)
+		}
+	}
+	s.reply(ctx, msg, buildHistoryText(project.Alias, filtered))
+}
+
+func (s *Service) handleConfirm(ctx context.Context, msg channelpkg.Message) {
+	conversationKey := conversationKeyFromMessage(msg)
+	pending, ok := s.getPendingConfirmation(conversationKey)
 	if !ok {
 		s.reply(ctx, msg, "当前没有待确认的高风险任务。")
 		return
 	}
 	if pending.ProjectAlias != "" {
-		_ = s.store.SetProjectAlias(msg.ConversationKey(), pending.ProjectAlias)
+		_ = s.store.SetProjectAlias(conversationKey, pending.ProjectAlias)
 	}
-	s.clearPendingConfirmation(msg.ConversationKey())
+	s.clearPendingConfirmation(conversationKey)
 	s.dispatchTask(ctx, msg, pending.Mode, pending.Body, true)
 }
 
-func (s *Service) handleApprove(ctx context.Context, msg qq.IncomingMessage, text string) {
+func (s *Service) handleApprove(ctx context.Context, msg channelpkg.Message, text string) {
 	decision, ok := parseApprovalCommandDecision(text)
 	if !ok {
 		s.reply(ctx, msg, "支持：/approve 或 /approve session")
 		return
 	}
-	if s.resolveNativeApproval(msg.ConversationKey(), decision) {
+	if s.resolveNativeApproval(conversationKeyFromMessage(msg), decision) {
 		return
 	}
 	s.reply(ctx, msg, "当前没有待处理的审批请求。")
 }
 
-func (s *Service) handleDeny(ctx context.Context, msg qq.IncomingMessage, text string) {
+func (s *Service) handleDeny(ctx context.Context, msg channelpkg.Message, text string) {
 	decision, ok := parseDenyCommandDecision(text)
 	if !ok {
 		s.reply(ctx, msg, "支持：/deny")
 		return
 	}
-	if s.resolveNativeApproval(msg.ConversationKey(), decision) {
+	if s.resolveNativeApproval(conversationKeyFromMessage(msg), decision) {
 		return
 	}
 	s.reply(ctx, msg, "当前没有待处理的审批请求。")
 }
 
-func (s *Service) executeTask(ctx context.Context, msg qq.IncomingMessage, mode, body string) {
-	conversationKey := msg.ConversationKey()
+func (s *Service) executeTask(ctx context.Context, msg channelpkg.Message, mode, body string, cancel context.CancelFunc) {
+	conversationKey := conversationKeyFromMessage(msg)
 	if !s.acquireBusy(conversationKey) {
 		s.reply(ctx, msg, "我这边正在处理上一条任务，稍等一下再发我。⏳")
 		return
 	}
 	defer s.releaseBusy(conversationKey)
+	defer s.clearRunningTask(conversationKey)
 
 	project := s.resolveCurrentProject(conversationKey)
 	session, err := s.store.GetOrCreateActiveSession(conversationKey, project.Alias, project.Path, s.cfg.Bridge.DefaultRunMode)
@@ -459,6 +521,18 @@ func (s *Service) executeTask(ctx context.Context, msg qq.IncomingMessage, mode,
 	} else if mode == "read" {
 		sandbox = s.cfg.Bridge.ReadOnlyCodexSandbox
 	}
+	taskSummary := summarizeTaskText(body)
+	taskState := &runningTaskState{
+		Cancel:       cancel,
+		StartedAt:    time.Now(),
+		SessionID:    session.ID,
+		SessionName:  session.Name,
+		ProjectAlias: project.Alias,
+		Backend:      backend,
+		Mode:         mode,
+		Summary:      taskSummary,
+	}
+	s.setRunningTask(conversationKey, taskState)
 	var streamedFinal string
 	var streamedMu sync.Mutex
 	notifyDone := make(chan struct{})
@@ -482,19 +556,20 @@ func (s *Service) executeTask(ctx context.Context, msg qq.IncomingMessage, mode,
 		SessionID:      session.ID,
 		ProjectAlias:   project.Alias,
 		ProjectPath:    project.Path,
-		TargetType:     msg.ChatType,
-		SenderID:       msg.SenderID,
-		TargetID:       msg.TargetID,
+		TargetType:     messageTargetType(msg),
+		SenderID:       messageSenderID(msg),
+		TargetID:       messageTargetID(msg),
 		ThreadID:       threadID,
 		SandboxMode:    sandbox,
 		Model:          model,
 		MaxPromptChars: s.cfg.Bridge.MaxPromptChars,
 		Timeout:        time.Duration(s.cfg.Bridge.CodexTimeoutMs) * time.Millisecond,
 		ProgressHandler: func(event codex.ProgressEvent) {
-			text := strings.TrimSpace(filterProgressForQQ(event.Text, body))
+			text := strings.TrimSpace(filterProgressForChannel(event.Text, body))
 			if text == "" {
 				return
 			}
+			s.updateRunningTaskProgress(conversationKey, text)
 			streamedMu.Lock()
 			if streamedFinal != "" {
 				streamedMu.Unlock()
@@ -502,7 +577,7 @@ func (s *Service) executeTask(ctx context.Context, msg qq.IncomingMessage, mode,
 			}
 			streamedFinal = text
 			streamedMu.Unlock()
-			for _, chunk := range splitForQQ(text, s.cfg.Bridge.QQMaxReplyChars) {
+			for _, chunk := range splitReplyText(text, s.cfg.Bridge.MaxReplyChars) {
 				s.proactive(context.Background(), msg, chunk)
 			}
 		},
@@ -528,7 +603,7 @@ func (s *Service) executeTask(ctx context.Context, msg qq.IncomingMessage, mode,
 				return decision, nil
 			case <-time.After(time.Duration(s.cfg.Bridge.ConfirmationTTLMS) * time.Millisecond):
 				s.clearNativeApproval(conversationKey)
-				return codex.ApprovalDeny, fmt.Errorf("等待 QQ 审批超时")
+				return codex.ApprovalDeny, fmt.Errorf("等待聊天端审批超时")
 			case <-ctx.Done():
 				s.clearNativeApproval(conversationKey)
 				return codex.ApprovalDeny, ctx.Err()
@@ -554,16 +629,23 @@ func (s *Service) executeTask(ctx context.Context, msg qq.IncomingMessage, mode,
 		oldThread := session.ThreadID
 		session.ThreadID = ""
 		_ = s.store.UpdateSession(session)
-		s.auditIfEnabled(AuditEvent{Status: "thread_reset", Reason: "legacy_never_policy", AccountID: msg.AccountID, ChatType: msg.ChatType, TargetID: msg.TargetID, SenderID: msg.SenderID, ProjectAlias: project.Alias, ProjectPath: project.Path, SessionID: session.ID, Mode: mode, Text: oldThread})
+		s.updateSessionTaskSummary(session.ID, backend, mode, "thread_reset", taskSummary)
+		s.auditIfEnabled(AuditEvent{Status: "thread_reset", Reason: "legacy_never_policy", AccountID: msg.ChannelID, ChatType: messageTargetType(msg), TargetID: messageTargetID(msg), SenderID: messageSenderID(msg), ProjectAlias: project.Alias, ProjectPath: project.Path, SessionID: session.ID, Mode: mode, Text: oldThread})
 		s.proactive(context.Background(), msg, fmt.Sprintf("%s\n\n%s",
-			"我已经定位到原因：当前 QQ 会话绑定的是一条旧的 Codex 线程，它继承了历史上的 `never` 审批策略。",
+			"我已经定位到原因：当前对话绑定的是一条旧的 Codex 线程，它继承了历史上的 `never` 审批策略。",
 			"我已自动切断这条旧线程绑定。请你把刚才那条需求再发一次；下一次会走新的、支持 Codex 原生审批的线程。",
 		))
 		return
 	}
 
 	if err != nil {
-		s.auditIfEnabled(AuditEvent{Status: "failed", Reason: err.Error(), AccountID: msg.AccountID, ChatType: msg.ChatType, TargetID: msg.TargetID, SenderID: msg.SenderID, ProjectAlias: project.Alias, ProjectPath: project.Path, SessionID: session.ID, Mode: mode, Text: body})
+		if taskState.StopRequested {
+			s.updateSessionTaskSummary(session.ID, backend, mode, "stopped", taskSummary)
+			s.auditIfEnabled(AuditEvent{Status: "stopped", Reason: "user_stop", AccountID: msg.ChannelID, ChatType: messageTargetType(msg), TargetID: messageTargetID(msg), SenderID: messageSenderID(msg), ProjectAlias: project.Alias, ProjectPath: project.Path, SessionID: session.ID, Mode: mode, Text: body})
+			return
+		}
+		s.updateSessionTaskSummary(session.ID, backend, mode, "failed", taskSummary)
+		s.auditIfEnabled(AuditEvent{Status: "failed", Reason: err.Error(), AccountID: msg.ChannelID, ChatType: messageTargetType(msg), TargetID: messageTargetID(msg), SenderID: messageSenderID(msg), ProjectAlias: project.Alias, ProjectPath: project.Path, SessionID: session.ID, Mode: mode, Text: body})
 		s.proactive(context.Background(), msg, buildFailureReply(err, result, body))
 		return
 	}
@@ -571,14 +653,15 @@ func (s *Service) executeTask(ctx context.Context, msg qq.IncomingMessage, mode,
 	if content == "" {
 		content = "我这边执行完成了，但没有拿到可返回的文本结果。"
 	}
-	s.auditIfEnabled(AuditEvent{Status: "success", AccountID: msg.AccountID, ChatType: msg.ChatType, TargetID: msg.TargetID, SenderID: msg.SenderID, ProjectAlias: project.Alias, ProjectPath: project.Path, SessionID: session.ID, Mode: mode, Text: body})
+	s.updateSessionTaskSummary(session.ID, backend, mode, "success", taskSummary)
+	s.auditIfEnabled(AuditEvent{Status: "success", AccountID: msg.ChannelID, ChatType: messageTargetType(msg), TargetID: messageTargetID(msg), SenderID: messageSenderID(msg), ProjectAlias: project.Alias, ProjectPath: project.Path, SessionID: session.ID, Mode: mode, Text: body})
 	streamedMu.Lock()
 	shouldSkip := streamedFinal != "" && shouldSkipFinalReply(streamedFinal, content)
 	streamedMu.Unlock()
 	if shouldSkip {
 		return
 	}
-	for _, chunk := range splitForQQ(content, s.cfg.Bridge.QQMaxReplyChars) {
+	for _, chunk := range splitReplyText(content, s.cfg.Bridge.MaxReplyChars) {
 		s.proactive(context.Background(), msg, chunk)
 	}
 }
@@ -601,22 +684,24 @@ func buildFailureReply(execErr error, result codex.TurnResult, userBody string) 
 	return fmt.Sprintf("执行失败：%v\n\n%s", execErr, tailText(details, 1200))
 }
 
-func (s *Service) dispatchTask(ctx context.Context, msg qq.IncomingMessage, mode, body string, confirmed bool) {
+func (s *Service) dispatchTask(ctx context.Context, msg channelpkg.Message, mode, body string, confirmed bool) {
 	if !confirmed {
 		if s.requestDangerousTaskConfirmation(ctx, msg, mode, body) {
 			return
 		}
 	}
-	go s.executeTask(context.Background(), msg, mode, body)
+	taskCtx, cancel := context.WithCancel(context.Background())
+	go s.executeTask(taskCtx, msg, mode, body, cancel)
 }
 
-func (s *Service) requestDangerousTaskConfirmation(ctx context.Context, msg qq.IncomingMessage, mode, body string) bool {
+func (s *Service) requestDangerousTaskConfirmation(ctx context.Context, msg channelpkg.Message, mode, body string) bool {
 	danger := shouldRequireConfirmation(mode, body)
 	if !danger.Matched {
 		return false
 	}
-	project := s.resolveCurrentProject(msg.ConversationKey())
-	s.setPendingConfirmation(msg.ConversationKey(), PendingTask{
+	conversationKey := conversationKeyFromMessage(msg)
+	project := s.resolveCurrentProject(conversationKey)
+	s.setPendingConfirmation(conversationKey, PendingTask{
 		Mode:         mode,
 		Body:         body,
 		Reason:       danger.Reason,
@@ -627,10 +712,10 @@ func (s *Service) requestDangerousTaskConfirmation(ctx context.Context, msg qq.I
 	s.auditIfEnabled(AuditEvent{
 		Status:       "awaiting_confirm",
 		Reason:       danger.Reason,
-		AccountID:    msg.AccountID,
-		ChatType:     msg.ChatType,
-		TargetID:     msg.TargetID,
-		SenderID:     msg.SenderID,
+		AccountID:    msg.ChannelID,
+		ChatType:     messageTargetType(msg),
+		TargetID:     messageTargetID(msg),
+		SenderID:     messageSenderID(msg),
 		ProjectAlias: project.Alias,
 		ProjectPath:  project.Path,
 		Mode:         mode,
@@ -645,8 +730,8 @@ func (s *Service) requestDangerousTaskConfirmation(ctx context.Context, msg qq.I
 	return true
 }
 
-func (s *Service) resolveImplicitRunMode(msg qq.IncomingMessage) (string, error) {
-	conversationKey := msg.ConversationKey()
+func (s *Service) resolveImplicitRunMode(msg channelpkg.Message) (string, error) {
+	conversationKey := conversationKeyFromMessage(msg)
 	project := s.resolveCurrentProject(conversationKey)
 	session, err := s.store.GetOrCreateActiveSession(conversationKey, project.Alias, project.Path, s.implicitSessionInitMode())
 	if err != nil {
@@ -659,8 +744,21 @@ func (s *Service) implicitSessionInitMode() string {
 	return resolveDefaultRunMode("", s.cfg.Bridge.ImplicitMessageMode, s.cfg.Bridge.DefaultRunMode)
 }
 
+func (s *Service) updateSessionTaskSummary(sessionID, backend, mode, status, summary string) {
+	if s == nil || s.store == nil || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	_ = s.store.UpdateSessionTaskSummary(sessionID, store.SessionTaskSummary{
+		At:      time.Now(),
+		Backend: backend,
+		Mode:    mode,
+		Status:  status,
+		Summary: summary,
+	})
+}
+
 func extractFailureSummary(text, userBody string) string {
-	filtered := filterProgressForQQ(text, userBody)
+	filtered := filterProgressForChannel(text, userBody)
 	if filtered == "" {
 		return ""
 	}
@@ -692,33 +790,47 @@ func (s *Service) resolveCurrentProject(conversationKey string) cfgpkg.ProjectCo
 	return project
 }
 
-func (s *Service) isAllowedTarget(msg qq.IncomingMessage) bool {
+func (s *Service) isAllowedTarget(msg channelpkg.Message) bool {
 	if s.cfg.Bridge.AllowAllTargets {
 		return true
 	}
-	scoped := msg.AccountID + ":" + msg.ChatType + ":" + msg.TargetID
-	unscoped := msg.ChatType + ":" + msg.TargetID
-	for _, item := range s.cfg.Bridge.AllowedTargets {
+	scoped := strings.TrimSpace(msg.Scope.Key)
+	channelScoped := msg.ChannelID + ":" + messageTargetType(msg) + ":" + messageTargetID(msg)
+	unscoped := messageTargetType(msg) + ":" + messageTargetID(msg)
+	for _, item := range s.cfg.Bridge.AllowedScopes {
 		if item == scoped || item == unscoped {
+			return true
+		}
+		if item == channelScoped {
 			return true
 		}
 	}
 	return false
 }
 
-func (s *Service) reply(ctx context.Context, msg qq.IncomingMessage, content string) {
-	content = trimForQQ(content, s.cfg.Bridge.QQMaxReplyChars)
-	s.logger.Info("发送 QQ 回复", "accountId", msg.AccountID, "chatType", msg.ChatType, "targetId", msg.TargetID, "replyTo", msg.MessageID, "content", trimForLog(content, 200))
-	if err := s.api.ReplyMessage(ctx, msg.AccountID, msg.ChatType, msg.TargetID, msg.MessageID, content); err != nil {
-		s.logger.Error("回复消息失败", "accountId", msg.AccountID, "chatType", msg.ChatType, "targetId", msg.TargetID, "replyTo", msg.MessageID, "error", err)
+func (s *Service) reply(ctx context.Context, msg channelpkg.Message, content string) {
+	content = trimReplyText(content, s.cfg.Bridge.MaxReplyChars)
+	driver, ok := s.drivers[msg.ChannelID]
+	if !ok {
+		s.logger.Error("channel 回复失败：未找到 driver", "channelId", msg.ChannelID)
+		return
+	}
+	s.logger.Info("发送 channel 回复", "channelId", msg.ChannelID, "scope", msg.Scope.Key, "replyTo", msg.MessageID, "content", trimForLog(content, 200))
+	if err := driver.Reply(ctx, msg.ReplyRef, content); err != nil {
+		s.logger.Error("channel 回复失败", "channelId", msg.ChannelID, "scope", msg.Scope.Key, "replyTo", msg.MessageID, "error", err)
 	}
 }
 
-func (s *Service) proactive(ctx context.Context, msg qq.IncomingMessage, content string) {
-	content = trimForQQ(content, s.cfg.Bridge.QQMaxReplyChars)
-	s.logger.Info("发送 QQ 主动消息", "accountId", msg.AccountID, "chatType", msg.ChatType, "targetId", msg.TargetID, "content", trimForLog(content, 200))
-	if err := s.api.ProactiveMessage(ctx, msg.AccountID, msg.ChatType, msg.TargetID, content); err != nil {
-		s.logger.Error("主动消息发送失败", "accountId", msg.AccountID, "chatType", msg.ChatType, "targetId", msg.TargetID, "error", err)
+func (s *Service) proactive(ctx context.Context, msg channelpkg.Message, content string) {
+	content = trimReplyText(content, s.cfg.Bridge.MaxReplyChars)
+	driver, ok := s.drivers[msg.ChannelID]
+	if !ok {
+		s.logger.Error("channel 主动消息发送失败：未找到 driver", "channelId", msg.ChannelID)
+		return
+	}
+	s.logger.Info("发送 channel 主动消息", "channelId", msg.ChannelID, "scope", msg.Scope.Key, "content", trimForLog(content, 200))
+	if err := driver.Send(ctx, msg.ReplyRef, content); err != nil {
+		s.logger.Error("channel 主动消息发送失败", "channelId", msg.ChannelID, "scope", msg.Scope.Key, "error", err)
 	}
 }
 
@@ -802,9 +914,9 @@ func (s *Service) resolveNativeApproval(key string, decision codex.ApprovalDecis
 	return true
 }
 
-func (s *Service) handleNaturalApproval(_ context.Context, msg qq.IncomingMessage, text string) bool {
+func (s *Service) handleNaturalApproval(_ context.Context, msg channelpkg.Message, text string) bool {
 	if decision, ok := parseNaturalApprovalDecision(text); ok {
-		return s.resolveNativeApproval(msg.ConversationKey(), decision)
+		return s.resolveNativeApproval(conversationKeyFromMessage(msg), decision)
 	}
 	return false
 }
@@ -897,7 +1009,7 @@ func normalizeRunMode(value string) string {
 	return ""
 }
 
-func filterProgressForQQ(text, userBody string) string {
+func filterProgressForChannel(text, userBody string) string {
 	lines := strings.Split(strings.ReplaceAll(text, "\r", "\n"), "\n")
 	kept := make([]string, 0, len(lines))
 	for _, line := range lines {
@@ -905,7 +1017,7 @@ func filterProgressForQQ(text, userBody string) string {
 		if line == "" {
 			continue
 		}
-		if isQQRelayNoiseLine(line, userBody) {
+		if isRelayNoiseLine(line, userBody) {
 			continue
 		}
 		kept = append(kept, line)
@@ -913,7 +1025,7 @@ func filterProgressForQQ(text, userBody string) string {
 	return strings.TrimSpace(strings.Join(kept, "\n"))
 }
 
-func isQQRelayNoiseLine(line, userBody string) bool {
+func isRelayNoiseLine(line, userBody string) bool {
 	lower := strings.ToLower(strings.TrimSpace(line))
 	if lower == "" {
 		return true
@@ -1015,7 +1127,7 @@ func shouldSkipFinalReply(streamed, final string) bool {
 	return strings.Contains(left, right)
 }
 
-func trimForQQ(text string, maxChars int) string {
+func trimReplyText(text string, maxChars int) string {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return "我这边执行完成了，但没有拿到可返回的文本结果。"
@@ -1047,7 +1159,7 @@ func trimForLog(text string, maxChars int) string {
 	return string(runes[:maxChars]) + "..."
 }
 
-func splitForQQ(text string, maxChars int) []string {
+func splitReplyText(text string, maxChars int) []string {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return []string{"我这边执行完成了，但没有拿到可返回的文本结果。"}

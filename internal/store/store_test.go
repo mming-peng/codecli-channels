@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestStoreSessionLifecycle(t *testing.T) {
@@ -90,5 +91,53 @@ func TestUpdateSessionStoresClaudeSessionID(t *testing.T) {
 	}
 	if string(data) == "" || !strings.Contains(string(data), "claudeSessionId") {
 		t.Fatalf("expected claudeSessionId in state json, got: %s", string(data))
+	}
+}
+
+func TestStoreTaskSummaryPersistence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	store, err := New(path)
+	if err != nil {
+		t.Fatalf("New error: %v", err)
+	}
+	conversationKey := ConversationKey("default", "user", "u1")
+	session, err := store.GetOrCreateActiveSession(conversationKey, "demo", "/tmp/demo", "write")
+	if err != nil {
+		t.Fatalf("GetOrCreateActiveSession error: %v", err)
+	}
+	at := time.Date(2026, 3, 22, 10, 30, 0, 0, time.FixedZone("CST", 8*3600))
+	err = store.UpdateSessionTaskSummary(session.ID, SessionTaskSummary{
+		At:      at,
+		Backend: "codex",
+		Mode:    "write",
+		Status:  "success",
+		Summary: "修复状态面板",
+	})
+	if err != nil {
+		t.Fatalf("UpdateSessionTaskSummary error: %v", err)
+	}
+
+	reloaded, err := New(path)
+	if err != nil {
+		t.Fatalf("reload New error: %v", err)
+	}
+	loaded, err := reloaded.GetOrCreateActiveSession(conversationKey, "demo", "/tmp/demo", "write")
+	if err != nil {
+		t.Fatalf("GetOrCreateActiveSession reload error: %v", err)
+	}
+	if loaded.LastBackend != "codex" {
+		t.Fatalf("unexpected backend: %s", loaded.LastBackend)
+	}
+	if loaded.LastTaskMode != "write" {
+		t.Fatalf("unexpected mode: %s", loaded.LastTaskMode)
+	}
+	if loaded.LastTaskStatus != "success" {
+		t.Fatalf("unexpected status: %s", loaded.LastTaskStatus)
+	}
+	if loaded.LastTaskSummary != "修复状态面板" {
+		t.Fatalf("unexpected summary: %s", loaded.LastTaskSummary)
+	}
+	if !loaded.LastTaskAt.Equal(at) {
+		t.Fatalf("unexpected task time: %v", loaded.LastTaskAt)
 	}
 }

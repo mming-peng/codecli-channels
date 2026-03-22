@@ -1,9 +1,10 @@
 package bridge
 
 import (
+	"strings"
 	"testing"
 
-	cfgpkg "qq-codex-go/internal/config"
+	cfgpkg "codecli-channels/internal/config"
 )
 
 func TestParseBridgeCommand(t *testing.T) {
@@ -30,5 +31,18 @@ func TestDetectDangerousTask(t *testing.T) {
 	matched = DetectDangerousTask("帮我看看 README")
 	if matched.Matched {
 		t.Fatal("did not expect dangerous task")
+	}
+}
+
+func TestBuildHelpTextIncludesStatusHistoryAndStop(t *testing.T) {
+	cfg := cfgpkg.BridgeConfig{RequireCommandPrefix: true}
+	text := BuildHelpText(cfg)
+	for _, want := range []string{"/status", "/stop", "/history"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected help text to contain %s, got %q", want, text)
+		}
+	}
+	if !strings.Contains(text, "常用操作") {
+		t.Fatalf("expected scenario-oriented help text, got %q", text)
 	}
 }

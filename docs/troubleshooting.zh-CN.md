@@ -6,17 +6,26 @@
 
 - 进程是否还在运行
 - 日志里是否出现 `QQ 网关 READY`
-- `allowedTargets` 里是否包含对应的 `openid` 或 `group_openid`
+- `allowedScopes` 里是否包含对应作用域（如果仍用旧配置，再看 `allowedTargets`）
 - `appId` / `clientSecret` 是否正确
 
 ## `/ping` 有回复，但普通任务没反应
 
 优先检查：
 
+- 先看当前总状态：`/status`
 - 当前项目是否正确：`/project current`
 - 当前会话是否异常：`/session current`
 - 会话是否绑定到了不合适的 thread
 - bridge 日志里是否记录到了该 QQ 消息
+
+## 任务一直在跑，但你想临时改方向
+
+建议先试：
+
+- `/status`：确认当前会话是否仍在执行
+- `/stop`：中断当前任务
+- `/history`：确认刚才那条任务到底执行到了哪一步
 
 ## QQ 里没有收到审批
 
@@ -27,9 +36,17 @@
 
 然后查看日志里是否出现主动消息发送和审批相关记录。
 
+## 会话状态看不明白
+
+优先用这几个命令重新对齐上下文：
+
+- `/status`：看当前项目、会话、模式和审批状态
+- `/session list`：看每个会话最近做过什么
+- `/history`：看当前项目最近任务记录
+
 ## 状态文件落在了意外的位置
 
-建议在 `qqbot.json` 中显式设置：
+建议在 `codecli-channels.json` 中显式设置（旧的 `qqbot.json` 也仍兼容）：
 
 - `bridge.dataDir`
 - `bridge.stateFile`

@@ -1,22 +1,25 @@
-# qq-codex-go
+# codecli-channels
 
-Remote Codex / Claude Code for QQ.
+Remote Codex / Claude Code Channels.
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-`qq-codex-go` connects **official QQ bots** to **Codex running on your local machine**, so a QQ conversation can behave like a persistent remote coding session.
+`codecli-channels` is a local channels bridge for Code CLI tools. It now has a multi-channel core, with **QQ** already migrated to a driver-based transport and **Feishu** / **Weixin** prepared as independent driver entry points.
 
-It is built for real project work instead of simple chatbot replies: project switching, session continuity, native approval forwarding, and controlled writable execution are all first-class parts of the design.
+It is built for real project work instead of simple chatbot replies: project switching, session continuity, native approval forwarding, controlled writable execution, task status visibility, and stop/review loops are all first-class parts of the design. QQ is the first supported channel, not the long-term boundary.
 
 ## Features
 
-- Official QQ bot integration, no OneBot dependency
-- Persistent mapping from QQ conversation to local session and Codex thread
+- QQ channel integration via the official bot API, no OneBot dependency
+- Persistent mapping from channel conversation to local session and Codex thread
 - Multiple local project workspaces
-- Native Codex approval flow in QQ
+- Native Codex approval flow in the chat channel
 - Optional Claude Code backend (`claude -p` headless mode)
+- Unified status overview with `/status`
 - Read-only analysis with `/ask`
 - Writable execution with `/run`
+- Stop the current task with `/stop`
+- Review recent work with `/history`
 - Session management with `/session`
 - Project switching with `/project`
 - Early “working on it” reply for slower turns
@@ -25,14 +28,14 @@ It is built for real project work instead of simple chatbot replies: project swi
 ## Architecture
 
 ```text
-QQ conversation
+Channel Driver
   -> local project
   -> bridge session
   -> Codex thread
   -> codex app-server
 ```
 
-This lets the bridge keep context across messages, isolate projects cleanly, and route approvals back to the correct QQ conversation.
+This lets the bridge keep context across messages, isolate projects cleanly, and route approvals back to the correct channel conversation.
 
 ## Quick Start
 
@@ -49,7 +52,7 @@ This lets the bridge keep context across messages, isolate projects cleanly, and
 ### 1. Create a config file
 
 ```bash
-cp config/qqbot.example.json config/qqbot.json
+cp config/codecli-channels.example.json config/codecli-channels.json
 ```
 
 ### 2. Fill in credentials and paths
@@ -60,19 +63,22 @@ Minimal example:
 {
   "defaultAccountId": "default",
   "defaultTimezone": "Asia/Shanghai",
-  "accounts": {
+  "channels": {
     "default": {
+      "type": "qq",
       "enabled": true,
-      "appId": "YOUR_APP_ID",
-      "clientSecret": "YOUR_APP_SECRET"
+      "options": {
+        "appId": "YOUR_APP_ID",
+        "clientSecret": "YOUR_APP_SECRET"
+      }
     }
   },
   "bridge": {
     "enabled": true,
     "backend": "codex",
-    "accountIds": ["default"],
+    "channelIds": ["default"],
     "allowAllTargets": false,
-    "allowedTargets": [
+    "allowedScopes": [
       "default:user:YOUR_OPENID"
     ],
     "requireCommandPrefix": true,
@@ -80,39 +86,42 @@ Minimal example:
     "writePrefixes": ["/run", "/exec", "执行"],
     "confirmPrefixes": ["/confirm", "/确认"],
     "projects": {
-      "qq-codex-go": {
-        "path": "/path/to/qq-codex-go",
-        "description": "this repository"
+      "codecli-channels": {
+        "path": "/path/to/codecli-channels",
+        "description": "channels bridge (QQ channel enabled)"
       }
     },
-    "defaultProject": "qq-codex-go",
+    "defaultProject": "codecli-channels",
+    "maxReplyChars": 1500,
     "readOnlyCodexSandbox": "read-only",
     "writeCodexSandbox": "workspace-write",
     "defaultRunMode": "write",
     "implicitMessageMode": "write",
     "claudeBinary": "claude",
     "claudeModel": null,
-    "dataDir": "/path/to/qq-codex-go/data",
-    "stateFile": "/path/to/qq-codex-go/data/state.json",
-    "auditFile": "/path/to/qq-codex-go/data/bridge-audit.jsonl"
+    "dataDir": "/path/to/codecli-channels/data",
+    "stateFile": "/path/to/codecli-channels/data/state.json",
+    "auditFile": "/path/to/codecli-channels/data/bridge-audit.jsonl"
   }
 }
 ```
 
 > It is strongly recommended to set `dataDir`, `stateFile`, and `auditFile` explicitly.
-> `bridge.backend` is the default backend; you can switch per QQ conversation via `/backend use codex|claude`.
+> `qqMaxReplyChars` is still accepted for backward compatibility, but `maxReplyChars` is the preferred field now.
+> Legacy `accounts`, `accountIds`, and `allowedTargets` are still accepted, but `channels`, `channelIds`, and `allowedScopes` are now the preferred model.
+> `bridge.backend` is the default backend; you can switch per conversation via `/backend use codex|claude`.
 
 ### 3. Run the bridge
 
 ```bash
-go run ./cmd/qq-codex-go -config ./config/qqbot.json
+go run ./cmd/codecli-channels -config ./config/codecli-channels.json
 ```
 
 Or build a binary first:
 
 ```bash
-go build -o ./bin/qq-codex-go ./cmd/qq-codex-go
-./bin/qq-codex-go -config ./config/qqbot.json
+go build -o ./bin/codecli-channels ./cmd/codecli-channels
+./bin/codecli-channels -config ./config/codecli-channels.json
 ```
 
 ### 4. Verify the connection
@@ -121,8 +130,10 @@ Recommended validation order:
 
 1. Confirm the log shows `QQ 网关 READY`
 2. Send `/ping`
-3. Send `/project current`
+3. Send `/status`
 4. Send `/ask Explain what this project does`
+
+If you already have a legacy `config/qqbot.json`, the new binary will still fall back to it when `config/codecli-channels.json` is missing.
 
 ## Commands
 
@@ -132,6 +143,9 @@ Recommended validation order:
 | --- | --- |
 | `/ping` | Health check |
 | `/help` | Show help |
+| `/status` | Show current project, session, mode, approval, and running status |
+| `/stop` | Stop the current running task |
+| `/history` | Show recent tasks for the current project |
 | `/backend current` | Show current backend |
 | `/backend use <codex\|claude>` | Switch backend |
 | `/clear` | Start a fresh session |
@@ -152,7 +166,7 @@ Recommended validation order:
 | Command | Description |
 | --- | --- |
 | `/session current` | Show current session |
-| `/session list` | List sessions for current project |
+| `/session list` | List sessions for current project with recent task summaries |
 | `/session new [name]` | Create a new session |
 | `/session switch <id>` | Switch session |
 
@@ -213,7 +227,15 @@ When the first `final_answer` becomes available, the bridge prefers sending it i
 
 ### Reply splitting
 
-Long replies are automatically split into multiple QQ messages according to `qqMaxReplyChars`.
+Long replies are automatically split according to `maxReplyChars` (`qqMaxReplyChars` remains accepted as a legacy compatibility field).
+
+### Status and review
+
+Use these commands when you need to re-orient mid-session:
+
+- `/status` to see the current project, session, mode, pending approvals, and whether work is still running
+- `/stop` to interrupt the active task if you want to change direction
+- `/history` to review recent tasks for the current project
 
 ## Documentation
 

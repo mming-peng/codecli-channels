@@ -10,7 +10,7 @@ import (
 func TestBuildPromptKeepsOnlyUserPrompt(t *testing.T) {
 	got := buildPrompt(TurnOptions{
 		Prompt:         "  hi  ",
-		ProjectAlias:   "qq-codex-go",
+		ProjectAlias:   "codecli-channels",
 		ProjectPath:    "/tmp/project",
 		TargetType:     "group",
 		SenderID:       "u1",

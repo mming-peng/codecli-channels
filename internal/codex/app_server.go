@@ -302,7 +302,7 @@ func (s *appServerSession) Start() error {
 	var resp initializeResponse
 	if err := s.request(ctx, "initialize", map[string]any{
 		"clientInfo": map[string]any{
-			"name":    "qq-codex-go",
+			"name":    "codecli-channels",
 			"version": "0.1.0",
 		},
 	}, &resp); err != nil {

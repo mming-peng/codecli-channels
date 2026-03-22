@@ -513,7 +513,7 @@ func prepareScopedCodexRuntimeHome(projectPath, scope string) (string, error) {
 		hashInput = projectPath + "\n" + scope
 	}
 	hash := sha1.Sum([]byte(hashInput))
-	runtimeHome := filepath.Join(os.TempDir(), "qq-codex-go-codex-home", hex.EncodeToString(hash[:8]))
+	runtimeHome := filepath.Join(os.TempDir(), "codecli-channels-codex-home", hex.EncodeToString(hash[:8]))
 	if err := os.MkdirAll(runtimeHome, 0o755); err != nil {
 		return "", err
 	}

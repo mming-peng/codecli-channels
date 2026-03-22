@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"qq-codex-go/internal/codex"
+	"codecli-channels/internal/codex"
 )
 
 func TestBuildPromptRespectsMaxPromptChars(t *testing.T) {

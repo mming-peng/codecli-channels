@@ -20,8 +20,21 @@ type SessionRecord struct {
 	ThreadID        string    `json:"threadId,omitempty"`
 	ClaudeSessionID string    `json:"claudeSessionId,omitempty"`
 	DefaultRunMode  string    `json:"defaultRunMode"`
+	LastTaskAt      time.Time `json:"lastTaskAt,omitempty"`
+	LastTaskMode    string    `json:"lastTaskMode,omitempty"`
+	LastTaskStatus  string    `json:"lastTaskStatus,omitempty"`
+	LastTaskSummary string    `json:"lastTaskSummary,omitempty"`
+	LastBackend     string    `json:"lastBackend,omitempty"`
 	CreatedAt       time.Time `json:"createdAt"`
 	UpdatedAt       time.Time `json:"updatedAt"`
+}
+
+type SessionTaskSummary struct {
+	At      time.Time
+	Backend string
+	Mode    string
+	Status  string
+	Summary string
 }
 
 type state struct {
@@ -254,6 +267,29 @@ func (s *Store) UpdateSession(record *SessionRecord) error {
 	current.ClaudeSessionID = record.ClaudeSessionID
 	current.ProjectPath = record.ProjectPath
 	current.DefaultRunMode = record.DefaultRunMode
+	current.LastTaskAt = record.LastTaskAt
+	current.LastTaskMode = record.LastTaskMode
+	current.LastTaskStatus = record.LastTaskStatus
+	current.LastTaskSummary = record.LastTaskSummary
+	current.LastBackend = record.LastBackend
+	current.UpdatedAt = time.Now()
+	return s.saveLocked()
+}
+
+func (s *Store) UpdateSessionTaskSummary(sessionID string, summary SessionTaskSummary) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.data.Sessions[sessionID]
+	if !ok {
+		return fmt.Errorf("会话 %s 不存在", sessionID)
+	}
+	if !summary.At.IsZero() {
+		current.LastTaskAt = summary.At
+	}
+	current.LastBackend = strings.TrimSpace(summary.Backend)
+	current.LastTaskMode = strings.TrimSpace(summary.Mode)
+	current.LastTaskStatus = strings.TrimSpace(summary.Status)
+	current.LastTaskSummary = strings.TrimSpace(summary.Summary)
 	current.UpdatedAt = time.Now()
 	return s.saveLocked()
 }

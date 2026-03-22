@@ -1,4 +1,4 @@
-module qq-codex-go
+module codecli-channels
 
 go 1.25.0
 

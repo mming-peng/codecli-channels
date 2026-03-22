@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for your interest in contributing to `qq-codex-go`.
+Thanks for your interest in contributing to `codecli-channels`.
 
 ## Development Setup
 

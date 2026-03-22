@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	cfgpkg "qq-codex-go/internal/config"
+	cfgpkg "codecli-channels/internal/config"
 
 	"github.com/gorilla/websocket"
 )
@@ -26,7 +26,7 @@ var mentionRegexp = regexp.MustCompile(`<@!?\d+>`)
 type Gateway struct {
 	cfg       *cfgpkg.Config
 	api       *APIClient
-	accountID string
+	channelID string
 	handler   func(context.Context, IncomingMessage)
 	logger    *slog.Logger
 
@@ -42,8 +42,8 @@ type gatewayPayload struct {
 	D  json.RawMessage `json:"d"`
 }
 
-func NewGateway(cfg *cfgpkg.Config, api *APIClient, accountID string, logger *slog.Logger, handler func(context.Context, IncomingMessage)) *Gateway {
-	return &Gateway{cfg: cfg, api: api, accountID: accountID, logger: logger, handler: handler}
+func NewGateway(cfg *cfgpkg.Config, api *APIClient, channelID string, logger *slog.Logger, handler func(context.Context, IncomingMessage)) *Gateway {
+	return &Gateway{cfg: cfg, api: api, channelID: channelID, logger: logger, handler: handler}
 }
 
 func (g *Gateway) Start(ctx context.Context) {
@@ -56,7 +56,7 @@ func (g *Gateway) loop(ctx context.Context) {
 			return
 		}
 		if err := g.runOnce(ctx); err != nil && ctx.Err() == nil {
-			g.logger.Error("QQ 网关连接失败", "accountId", g.accountID, "error", err)
+			g.logger.Error("QQ 网关连接失败", "channelId", g.channelID, "error", err)
 			select {
 			case <-ctx.Done():
 				return
@@ -67,7 +67,7 @@ func (g *Gateway) loop(ctx context.Context) {
 }
 
 func (g *Gateway) runOnce(ctx context.Context) error {
-	gatewayURL, err := g.api.GetGatewayURL(ctx, g.accountID)
+	gatewayURL, err := g.api.GetGatewayURL(ctx, g.channelID)
 	if err != nil {
 		return err
 	}
@@ -132,7 +132,7 @@ func (g *Gateway) runOnce(ctx context.Context) error {
 			}
 		case 0:
 			if err := g.handleDispatch(ctx, payload.T, payload.D); err != nil {
-				g.logger.Error("处理 QQ 事件失败", "accountId", g.accountID, "type", payload.T, "error", err)
+				g.logger.Error("处理 QQ 事件失败", "channelId", g.channelID, "type", payload.T, "error", err)
 			}
 		case 7:
 			return fmt.Errorf("服务端要求重连")
@@ -160,7 +160,7 @@ func (g *Gateway) heartbeatLoop(ctx context.Context, conn *websocket.Conn, inter
 				payload["d"] = *seq
 			}
 			if err := conn.WriteJSON(payload); err != nil {
-				g.logger.Error("发送心跳失败", "accountId", g.accountID, "error", err)
+				g.logger.Error("发送心跳失败", "channelId", g.channelID, "error", err)
 				return
 			}
 		}
@@ -168,7 +168,7 @@ func (g *Gateway) heartbeatLoop(ctx context.Context, conn *websocket.Conn, inter
 }
 
 func (g *Gateway) identify(ctx context.Context, conn *websocket.Conn) error {
-	token, err := g.api.GetAccessToken(ctx, g.accountID)
+	token, err := g.api.GetAccessToken(ctx, g.channelID)
 	if err != nil {
 		return err
 	}
@@ -186,7 +186,7 @@ func (g *Gateway) identify(ctx context.Context, conn *websocket.Conn) error {
 func (g *Gateway) handleDispatch(ctx context.Context, eventType string, raw json.RawMessage) error {
 	switch eventType {
 	case "READY":
-		g.logger.Info("QQ 网关 READY", "accountId", g.accountID)
+		g.logger.Info("QQ 网关 READY", "channelId", g.channelID)
 		return nil
 	case "C2C_MESSAGE_CREATE":
 		var payload struct {
@@ -201,7 +201,7 @@ func (g *Gateway) handleDispatch(ctx context.Context, eventType string, raw json
 			return err
 		}
 		go g.handler(context.Background(), IncomingMessage{
-			AccountID: g.accountID,
+			ChannelID: g.channelID,
 			ChatType:  "user",
 			TargetID:  payload.Author.UserOpenID,
 			SenderID:  payload.Author.UserOpenID,
@@ -224,7 +224,7 @@ func (g *Gateway) handleDispatch(ctx context.Context, eventType string, raw json
 			return err
 		}
 		go g.handler(context.Background(), IncomingMessage{
-			AccountID: g.accountID,
+			ChannelID: g.channelID,
 			ChatType:  "group",
 			TargetID:  payload.GroupOpenID,
 			SenderID:  payload.Author.MemberOpenID,

@@ -1,7 +1,9 @@
 package bridge
 
 import (
+	"bufio"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -52,4 +54,42 @@ func (a *AuditLogger) Write(event AuditEvent) error {
 	}
 	_, err = file.Write(append(data, '\n'))
 	return err
+}
+
+func (a *AuditLogger) ReadRecent(limit int) ([]AuditEvent, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if limit <= 0 {
+		limit = 10
+	}
+	file, err := os.Open(a.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer file.Close()
+
+	events := make([]AuditEvent, 0, limit)
+	reader := bufio.NewReader(file)
+	for {
+		line, readErr := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			var event AuditEvent
+			if err := json.Unmarshal(line, &event); err == nil {
+				events = append(events, event)
+			}
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			return nil, readErr
+		}
+	}
+	if len(events) <= limit {
+		return events, nil
+	}
+	return events[len(events)-limit:], nil
 }

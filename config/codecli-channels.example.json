@@ -1,24 +1,42 @@
 {
   "defaultAccountId": "default",
   "defaultTimezone": "Asia/Shanghai",
-  "accounts": {
+  "channels": {
     "default": {
+      "type": "qq",
       "enabled": true,
-      "appId": "你的AppID",
-      "clientSecret": "你的AppSecret"
+      "options": {
+        "appId": "你的AppID",
+        "clientSecret": "你的AppSecret"
+      }
     },
-    "bot2": {
+    "feishu-main": {
+      "type": "feishu",
       "enabled": false,
-      "appId": "第二个机器人AppID",
-      "clientSecret": "第二个机器人AppSecret"
+      "options": {
+        "appId": "cli_xxx",
+        "appSecret": "sec_xxx",
+        "allowFrom": ["ou_xxx"],
+        "shareSessionInChannel": false,
+        "threadIsolation": true
+      }
+    },
+    "weixin-main": {
+      "type": "weixin",
+      "enabled": false,
+      "options": {
+        "token": "你的ilinkToken",
+        "baseUrl": "https://ilinkai.weixin.qq.com",
+        "allowFrom": ["user@im.wechat"]
+      }
     }
   },
   "bridge": {
     "enabled": true,
     "backend": "codex",
-    "accountIds": ["default"],
+    "channelIds": ["default"],
     "allowAllTargets": false,
-    "allowedTargets": [
+    "allowedScopes": [
       "default:user:你的openid"
     ],
     "requireCommandPrefix": true,

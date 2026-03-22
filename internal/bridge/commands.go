@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	cfgpkg "qq-codex-go/internal/config"
+	cfgpkg "codecli-channels/internal/config"
 )
 
 var (
@@ -110,12 +110,22 @@ func BuildHelpText(cfg cfgpkg.BridgeConfig) string {
 		defaultText = "普通消息 - 直接发给当前后端（默认只读分析）"
 	}
 	return strings.Join([]string{
-		"可用命令：",
+		"常用操作：",
+		"/status - 看当前项目、会话、模式、审批和运行状态",
+		fmt.Sprintf("%s 你的问题 - 只读分析，不改文件", readPrefixes[0]),
+		fmt.Sprintf("%s 你的需求 - 在当前项目执行后端任务", writePrefixes[0]),
+		"/stop - 停止当前正在执行的任务",
+		"/history - 回看当前项目最近任务",
+		"",
+		"详细命令：",
 		defaultText,
 		"/ping - 健康检查",
 		"/help - 查看帮助",
 		"/backend current - 查看当前后端（codex/claude）",
 		"/backend use <codex|claude> - 切换后端",
+		"/status - 查看当前状态总览",
+		"/stop - 停止当前任务",
+		"/history - 查看当前项目最近任务",
 		"/project list - 查看项目列表",
 		"/project current - 查看当前项目",
 		"/project use <别名> - 切换项目",
@@ -126,8 +136,6 @@ func BuildHelpText(cfg cfgpkg.BridgeConfig) string {
 		"/session switch <id> - 切换会话",
 		"/mode - 查看当前默认执行模式",
 		"/mode write|read - 设置普通消息和 /run 的默认模式",
-		fmt.Sprintf("%s 你的问题 - 只读分析，不改文件", readPrefixes[0]),
-		fmt.Sprintf("%s 你的需求 - 在当前项目执行后端任务", writePrefixes[0]),
 		fmt.Sprintf("%s - 确认执行高风险写操作", confirmPrefixes[0]),
 		"/approve [session] - 同意当前 Codex 原生审批（Codex 后端），可选本会话记忆",
 		"/deny - 拒绝当前 Codex 原生审批（Codex 后端）",
