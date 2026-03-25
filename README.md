@@ -37,7 +37,7 @@ It is built for ongoing engineering work rather than generic chatbot wrapping. P
 | QQ | usable | Official QQ bot API and gateway |
 | Feishu | text MVP | Text-first driver |
 | Personal Weixin | text MVP | Built-in token onboarding flow |
-| Codex backend | primary path | `codex app-server` over stdio JSON-RPC |
+| Codex backend | transport | `codex app-server` over stdio JSON-RPC |
 | Claude backend | supported | `claude -p` headless mode |
 
 ## Minimal Run

@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -50,6 +51,9 @@ type Service struct {
 	runningTasks         map[string]*runningTaskState
 	pendingConfirmations map[string]PendingTask
 	nativeApprovals      map[string]*nativeApprovalState
+
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func NewService(cfg *cfgpkg.Config, logger *slog.Logger) (*Service, error) {
@@ -104,6 +108,68 @@ func (s *Service) Start(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (s *Service) Close(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	s.closeOnce.Do(func() {
+		s.closeErr = s.close(ctx)
+	})
+	return s.closeErr
+}
+
+func (s *Service) close(ctx context.Context) error {
+	errs := make([]error, 0)
+	for _, cancel := range s.cancelRunningTasksForShutdown() {
+		if cancel != nil {
+			cancel()
+		}
+	}
+	for _, driver := range s.snapshotDrivers() {
+		if err := driver.Stop(ctx); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	for _, runner := range []codex.TurnRunner{s.codexRunner, s.claudeRunner} {
+		closer, ok := runner.(interface{ Close() error })
+		if !ok || closer == nil {
+			continue
+		}
+		if err := closer.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return joinErrors(errs...)
+}
+
+func (s *Service) cancelRunningTasksForShutdown() []context.CancelFunc {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cancels := make([]context.CancelFunc, 0, len(s.runningTasks))
+	for _, state := range s.runningTasks {
+		if state == nil {
+			continue
+		}
+		state.StopRequested = true
+		if state.Cancel != nil {
+			cancels = append(cancels, state.Cancel)
+		}
+	}
+	return cancels
+}
+
+func (s *Service) snapshotDrivers() []channelpkg.Driver {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	drivers := make([]channelpkg.Driver, 0, len(s.drivers))
+	for _, driver := range s.drivers {
+		if driver != nil {
+			drivers = append(drivers, driver)
+		}
+	}
+	return drivers
 }
 
 func conversationKeyFromMessage(msg channelpkg.Message) string {
@@ -663,10 +729,54 @@ func buildFailureReply(execErr error, result codex.TurnResult, userBody string) 
 	if details == "" {
 		details = extractFailureSummary(result.CombinedText, userBody)
 	}
+	details = compactFailureDetails(execErr, details)
 	if details == "" {
 		return fmt.Sprintf("执行失败：%v", execErr)
 	}
 	return fmt.Sprintf("执行失败：%v\n\n%s", execErr, tailText(details, 1200))
+}
+
+func compactFailureDetails(execErr error, details string) string {
+	details = strings.TrimSpace(details)
+	if details == "" {
+		return ""
+	}
+	execText := ""
+	if execErr != nil {
+		execText = normalizeFailureText(execErr.Error())
+	}
+	lines := strings.Split(strings.ReplaceAll(details, "\r", "\n"), "\n")
+	kept := make([]string, 0, len(lines))
+	seen := map[string]struct{}{}
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		normalized := normalizeFailureText(line)
+		if normalized == "" {
+			continue
+		}
+		if execText != "" && (normalized == execText || strings.Contains(execText, normalized)) {
+			continue
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		kept = append(kept, line)
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
+}
+
+func normalizeFailureText(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	text = strings.ReplaceAll(text, "\r", "\n")
+	text = strings.Join(strings.Fields(text), " ")
+	return strings.ToLower(text)
 }
 
 func (s *Service) dispatchTask(ctx context.Context, msg channelpkg.Message, mode, body string, confirmed bool) {
@@ -988,6 +1098,19 @@ func parseNaturalApprovalDecision(text string) (codex.ApprovalDecision, bool) {
 		return codex.ApprovalDeny, true
 	}
 	return 0, false
+}
+
+func joinErrors(errs ...error) error {
+	filtered := make([]error, 0, len(errs))
+	for _, err := range errs {
+		if err != nil {
+			filtered = append(filtered, err)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return errors.Join(filtered...)
 }
 
 func shouldRequireConfirmation(mode, body string) DangerousMatch {

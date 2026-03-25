@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -12,9 +13,12 @@ import (
 	"time"
 )
 
+const appServerSessionIdleTTL = 15 * time.Minute
+
 type AppServerRunner struct {
 	Binary   string
 	mu       sync.Mutex
+	closed   bool
 	sessions map[string]*appServerSession
 }
 
@@ -28,14 +32,16 @@ type appServerSession struct {
 	writeMu sync.Mutex
 	mu      sync.Mutex
 
-	cmd      *exec.Cmd
-	stdin    io.WriteCloser
-	pending  map[string]chan rpcEnvelope
-	current  *appServerTurn
-	nextID   int64
-	started  bool
-	closed   bool
-	closeErr error
+	cmd        *exec.Cmd
+	stdin      io.WriteCloser
+	pending    map[string]chan rpcEnvelope
+	current    *appServerTurn
+	nextID     int64
+	started    bool
+	closed     bool
+	closeErr   error
+	lastUsedAt time.Time
+	running    bool
 }
 
 type appServerTurn struct {
@@ -206,10 +212,18 @@ func NewAppServerRunner() *AppServerRunner {
 
 func (r *AppServerRunner) RunTurn(ctx context.Context, opts TurnOptions) (TurnResult, error) {
 	key := scopedRunnerSessionKey(opts.ProjectPath, opts.SessionID)
+	now := time.Now()
+	staleSessions := make([]*appServerSession, 0)
 	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return TurnResult{}, fmt.Errorf("app-server runner 已关闭")
+	}
+	staleSessions = r.collectReapableSessionsLocked(now.Add(-appServerSessionIdleTTL))
 	session := r.sessions[key]
 	if session != nil && session.isClosed() {
 		delete(r.sessions, key)
+		staleSessions = append(staleSessions, session)
 		session = nil
 	}
 	if session == nil {
@@ -225,8 +239,21 @@ func (r *AppServerRunner) RunTurn(ctx context.Context, opts TurnOptions) (TurnRe
 		}
 		r.sessions[key] = session
 	}
+	if err := session.beginUse(now); err != nil {
+		r.mu.Unlock()
+		for _, stale := range staleSessions {
+			_ = stale.Close()
+		}
+		return TurnResult{}, err
+	}
 	r.mu.Unlock()
+	for _, stale := range staleSessions {
+		_ = stale.Close()
+	}
 
+	defer func() {
+		session.endUse(time.Now())
+	}()
 	result, err := session.RunTurn(ctx, opts)
 	if err != nil && session.isClosed() {
 		r.mu.Lock()
@@ -236,6 +263,47 @@ func (r *AppServerRunner) RunTurn(ctx context.Context, opts TurnOptions) (TurnRe
 		r.mu.Unlock()
 	}
 	return result, err
+}
+
+func (r *AppServerRunner) Close() error {
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return nil
+	}
+	r.closed = true
+	sessions := make([]*appServerSession, 0, len(r.sessions))
+	for key, session := range r.sessions {
+		sessions = append(sessions, session)
+		delete(r.sessions, key)
+	}
+	r.mu.Unlock()
+
+	errs := make([]error, 0, len(sessions))
+	for _, session := range sessions {
+		if session == nil {
+			continue
+		}
+		if err := session.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (r *AppServerRunner) collectReapableSessionsLocked(cutoff time.Time) []*appServerSession {
+	staleSessions := make([]*appServerSession, 0)
+	for key, session := range r.sessions {
+		if session == nil {
+			delete(r.sessions, key)
+			continue
+		}
+		if session.isClosed() || session.shouldRecycle(cutoff) {
+			staleSessions = append(staleSessions, session)
+			delete(r.sessions, key)
+		}
+	}
+	return staleSessions
 }
 
 func scopedRunnerSessionKey(projectPath, sessionID string) string {
@@ -291,6 +359,8 @@ func (s *appServerSession) Start() error {
 	s.closed = false
 	s.closeErr = nil
 	s.nextID = 0
+	s.running = false
+	s.lastUsedAt = time.Now()
 	s.mu.Unlock()
 
 	go s.readLoop(stdout)
@@ -351,6 +421,25 @@ func (s *appServerSession) RunTurn(ctx context.Context, opts TurnOptions) (TurnR
 		turn.finish(fmt.Errorf("Codex 执行超时（>%s）", opts.Timeout))
 		return turn.snapshot()
 	}
+}
+
+func (s *appServerSession) Close() error {
+	s.shutdown(io.EOF)
+
+	s.mu.Lock()
+	stdin := s.stdin
+	cmd := s.cmd
+	s.stdin = nil
+	s.cmd = nil
+	s.mu.Unlock()
+
+	if stdin != nil {
+		_ = stdin.Close()
+	}
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+	return nil
 }
 
 func (s *appServerSession) ensureThread(ctx context.Context, opts TurnOptions) (string, error) {
@@ -804,6 +893,36 @@ func (s *appServerSession) isClosed() bool {
 	return s.closed
 }
 
+func (s *appServerSession) beginUse(now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		if s.closeErr != nil {
+			return s.closeErr
+		}
+		return fmt.Errorf("app-server 会话已关闭")
+	}
+	s.running = true
+	s.lastUsedAt = now
+	return nil
+}
+
+func (s *appServerSession) endUse(now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.running = false
+	s.lastUsedAt = now
+}
+
+func (s *appServerSession) shouldRecycle(cutoff time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.running || s.lastUsedAt.IsZero() {
+		return false
+	}
+	return s.lastUsedAt.Before(cutoff)
+}
+
 func (s *appServerSession) shutdown(err error) {
 	s.mu.Lock()
 	if s.closed {
@@ -812,6 +931,7 @@ func (s *appServerSession) shutdown(err error) {
 	}
 	s.closed = true
 	s.closeErr = err
+	s.running = false
 	pending := s.pending
 	s.pending = map[string]chan rpcEnvelope{}
 	current := s.current

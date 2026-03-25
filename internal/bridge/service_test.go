@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -16,19 +17,23 @@ import (
 )
 
 type fakeChannelDriver struct {
-	id       string
-	platform string
-	replies  []string
-	sends    []string
+	id        string
+	platform  string
+	replies   []string
+	sends     []string
+	stopCalls int
 }
 
 type fakeTurnRunner struct {
-	mu       sync.Mutex
-	calls    int
-	lastOpts codex.TurnOptions
-	result   codex.TurnResult
-	err      error
-	calledCh chan codex.TurnOptions
+	mu         sync.Mutex
+	calls      int
+	closeCalls int
+	lastOpts   codex.TurnOptions
+	result     codex.TurnResult
+	err        error
+	closeErr   error
+	calledCh   chan codex.TurnOptions
+	run        func(context.Context, codex.TurnOptions) (codex.TurnResult, error)
 }
 
 func (d *fakeChannelDriver) ID() string { return d.id }
@@ -47,13 +52,19 @@ func (d *fakeChannelDriver) Send(_ context.Context, _ any, content string) error
 	return nil
 }
 
-func (d *fakeChannelDriver) Stop(context.Context) error { return nil }
+func (d *fakeChannelDriver) Stop(context.Context) error {
+	d.stopCalls++
+	return nil
+}
 
-func (r *fakeTurnRunner) RunTurn(_ context.Context, opts codex.TurnOptions) (codex.TurnResult, error) {
+func (r *fakeTurnRunner) RunTurn(ctx context.Context, opts codex.TurnOptions) (codex.TurnResult, error) {
 	r.mu.Lock()
 	r.calls++
 	r.lastOpts = opts
 	r.mu.Unlock()
+	if r.run != nil {
+		return r.run(ctx, opts)
+	}
 	if r.calledCh != nil {
 		select {
 		case r.calledCh <- opts:
@@ -67,6 +78,19 @@ func (r *fakeTurnRunner) CallCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.calls
+}
+
+func (r *fakeTurnRunner) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.closeCalls++
+	return r.closeErr
+}
+
+func (r *fakeTurnRunner) CloseCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.closeCalls
 }
 
 func TestExtractFailureSummary(t *testing.T) {
@@ -83,6 +107,23 @@ func TestExtractFailureSummary(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(got), "operation not permitted") {
 		t.Fatalf("expected permission detail, got %q", got)
+	}
+}
+
+func TestBuildFailureReplyDeduplicatesRepeatedStreamErrors(t *testing.T) {
+	execErr := "Codex 执行失败：stream disconnected before completion: An error occurred while processing your request. Please include the request ID 0aa4fd9f-401e-4afd-97b7-0db6548d8575 in your message."
+	details := strings.Join([]string{
+		"Reconnecting... 4/5 | stream disconnected before completion: An error occurred while processing your request. Please include the request ID 44201b86-5fed-4743-9308-f4cfce6a759b in your message.",
+		"Reconnecting... 5/5 | stream disconnected before completion: An error occurred while processing your request. Please include the request ID 0dd7fb73-c20f-4104-ad44-df12eb76ea53 in your message.",
+		"stream disconnected before completion: An error occurred while processing your request. Please include the request ID 0aa4fd9f-401e-4afd-97b7-0db6548d8575 in your message.",
+		"stream disconnected before completion: An error occurred while processing your request. Please include the request ID 0aa4fd9f-401e-4afd-97b7-0db6548d8575 in your message.",
+	}, "\n")
+	reply := buildFailureReply(errors.New(execErr), codex.TurnResult{ResponseText: details}, "现在是什么时间")
+	if strings.Count(reply, "request ID 0aa4fd9f-401e-4afd-97b7-0db6548d8575") != 1 {
+		t.Fatalf("expected terminal request id once, got reply %q", reply)
+	}
+	if strings.Count(reply, "Reconnecting... 4/5") != 1 || strings.Count(reply, "Reconnecting... 5/5") != 1 {
+		t.Fatalf("expected reconnect details to remain once, got reply %q", reply)
 	}
 }
 
@@ -257,6 +298,51 @@ func TestStopRunningTaskCancelsCurrentTask(t *testing.T) {
 	}
 	if !state.StopRequested {
 		t.Fatal("expected stop to mark running task")
+	}
+}
+
+func TestServiceCloseStopsDriversCancelsTasksAndClosesRunners(t *testing.T) {
+	canceled := false
+	driver := &fakeChannelDriver{id: "test-main", platform: "fake"}
+	codexRunner := &fakeTurnRunner{}
+	claudeRunner := &fakeTurnRunner{}
+	service := &Service{
+		drivers: map[string]channel.Driver{
+			"test-main": driver,
+		},
+		codexRunner:  codexRunner,
+		claudeRunner: claudeRunner,
+		runningTasks: map[string]*runningTaskState{
+			"conv-1": {
+				Cancel: func() { canceled = true },
+			},
+		},
+	}
+
+	if err := service.Close(context.Background()); err != nil {
+		t.Fatalf("Close error: %v", err)
+	}
+	if !canceled {
+		t.Fatal("expected running task to be canceled")
+	}
+	if !service.runningTasks["conv-1"].StopRequested {
+		t.Fatal("expected shutdown to mark task as stopped")
+	}
+	if driver.stopCalls != 1 {
+		t.Fatalf("expected driver stop once, got %d", driver.stopCalls)
+	}
+	if codexRunner.CloseCount() != 1 {
+		t.Fatalf("expected codex runner close once, got %d", codexRunner.CloseCount())
+	}
+	if claudeRunner.CloseCount() != 1 {
+		t.Fatalf("expected claude runner close once, got %d", claudeRunner.CloseCount())
+	}
+
+	if err := service.Close(context.Background()); err != nil {
+		t.Fatalf("second Close error: %v", err)
+	}
+	if driver.stopCalls != 1 {
+		t.Fatalf("expected idempotent driver stop, got %d", driver.stopCalls)
 	}
 }
 

@@ -42,7 +42,7 @@
 | QQ | 可用 | 基于官方 bot API 和 gateway |
 | 飞书 | 文本 MVP | 文本优先的 driver |
 | 个人微信 | 文本 MVP | 内建 token 接入流程 |
-| Codex 后端 | 主路径 | 基于 `codex app-server` |
+| Codex 后端 | 通信方式 | 基于 `codex app-server` |
 | Claude 后端 | 可选支持 | 基于 `claude -p` |
 
 ## 最短启动路径

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"codecli-channels/internal/bridge"
 	cfgpkg "codecli-channels/internal/config"
@@ -39,6 +40,11 @@ func runService(args []string, env commandEnv) error {
 	}
 	logger.Info("codecli-channels 已启动", "config", path)
 	<-ctx.Done()
+	closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := service.Close(closeCtx); err != nil {
+		logger.Error("codecli-channels 退出清理失败", "error", err)
+	}
 	logger.Info("codecli-channels 已退出")
 	return nil
 }
