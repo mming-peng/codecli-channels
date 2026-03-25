@@ -4,259 +4,71 @@ Turn chat channels into remote coding workbenches for Codex and Claude Code.
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-`codecli-channels` is a self-hosted local bridge that connects chat channels to local coding CLIs. It keeps each conversation mapped to a local project, a bridge session, and a backend thread, so you can continue real engineering work from QQ, Feishu, or personal Weixin without losing execution context.
+## Start Here
 
-This project is not a general chatbot wrapper. It is designed for ongoing development tasks: project switching, session continuity, approval forwarding, controlled write access, task history, and interruption are first-class concerns.
+If you are setting this project up for the first time, skip the long-form details and go straight to the channel quickstart that matches your first integration:
 
-## Why It Exists
+- [QQ quickstart](quickstart/qq-quickstart.zh-CN.md)
+- [Feishu quickstart](quickstart/feishu-quickstart.zh-CN.md)
+- [Personal Weixin quickstart](quickstart/weixin-quickstart.zh-CN.md)
 
-- Keep a persistent mapping from channel conversation -> local project -> bridge session -> Codex or Claude thread.
-- Let plain chat messages become the default work entrypoint instead of forcing slash-command-heavy workflows.
-- Forward backend approvals back into chat so risky operations stay reviewable.
-- Support multiple channel drivers behind one bridge core instead of coupling the project to a single platform.
-- Keep onboarding details such as personal Weixin token setup outside the runtime bridge path.
+These onboarding guides are currently written in Simplified Chinese and cover the real first steps: where to get credentials, how to fill the minimal config, and how to verify the first message flow.
+
+## What It Is
+
+`codecli-channels` is a self-hosted local bridge that maps each chat conversation to:
+
+- a local project
+- a persisted bridge session
+- a Codex or Claude backend thread
+
+It is built for ongoing engineering work rather than generic chatbot wrapping. Project switching, session continuity, approval forwarding, and controlled local execution are the core use cases.
 
 ## Current Status
 
 | Area | Status | Notes |
 | --- | --- | --- |
-| QQ | usable | Uses the official QQ bot API and gateway, no OneBot dependency |
-| Feishu | text MVP | Text-first driver with group/session isolation options |
-| Personal Weixin | text MVP | Built-in QR/token onboarding, text send/reply path in place |
-| Codex backend | primary path | Uses `codex app-server` over stdio JSON-RPC |
-| Claude backend | supported | Uses `claude -p` headless mode |
+| QQ | usable | Official QQ bot API and gateway |
+| Feishu | text MVP | Text-first driver |
+| Personal Weixin | text MVP | Built-in token onboarding flow |
+| Codex backend | primary path | `codex app-server` over stdio JSON-RPC |
+| Claude backend | supported | `claude -p` headless mode |
 
-Current gaps worth stating clearly:
+## Minimal Run
 
-- Feishu and Weixin are still text-focused drivers.
-- Weixin media messages are not executed as media workflows yet.
-- Interactive backend follow-up prompts such as `request_user_input` and MCP elicitation are not bridged yet.
+1. Copy the example config:
 
-## How It Works
+   ```bash
+   cp config/codecli-channels.example.json config/codecli-channels.json
+   ```
 
-```text
-Channel Driver
-  -> normalized channel.Message
-  -> bridge service
-  -> local project + persisted session
-  -> Codex / Claude runner
-  -> reply + approval loop back to chat
-```
+2. Follow one quickstart from `quickstart/` to finish channel credentials and bridge config.
 
-The key idea is that the bridge owns conversation routing and persistence, while channel drivers stay responsible for platform-specific transport details.
+3. Start the bridge:
 
-## Quick Start
+   ```bash
+   go run ./cmd/codecli-channels -config ./config/codecli-channels.json
+   ```
 
-### Requirements
+4. In chat, send `/help`, then send a plain task message.
 
-- Go `1.25+`
-- A working `codex` CLI installation if you want to use `bridge.backend=codex`
-- Completed Codex login on the host machine if you use the Codex backend
-- A working `claude` CLI installation if you want to use `bridge.backend=claude`
-- Completed Claude Code login on the host machine if you use the Claude backend
-- Credentials for at least one channel you want to enable
-- Access to the local project directories you want to expose through the bridge
+## Common Commands
 
-### 1. Copy the example config
-
-```bash
-cp config/codecli-channels.example.json config/codecli-channels.json
-```
-
-### 2. Fill in credentials, scopes, and project paths
-
-Minimal QQ-oriented example:
-
-```json
-{
-  "defaultAccountId": "default",
-  "defaultTimezone": "Asia/Shanghai",
-  "channels": {
-    "default": {
-      "type": "qq",
-      "enabled": true,
-      "options": {
-        "appId": "YOUR_APP_ID",
-        "clientSecret": "YOUR_APP_SECRET"
-      }
-    }
-  },
-  "bridge": {
-    "enabled": true,
-    "backend": "codex",
-    "channelIds": ["default"],
-    "allowAllTargets": false,
-    "allowedScopes": [
-      "default:user:YOUR_OPENID"
-    ],
-    "requireCommandPrefix": true,
-    "projects": {
-      "codecli-channels": {
-        "path": "/path/to/codecli-channels",
-        "description": "channels bridge"
-      }
-    },
-    "defaultProject": "codecli-channels",
-    "maxReplyChars": 1500,
-    "readOnlyCodexSandbox": "read-only",
-    "writeCodexSandbox": "workspace-write",
-    "defaultRunMode": "write",
-    "implicitMessageMode": "write",
-    "claudeBinary": "claude",
-    "claudeModel": null,
-    "dataDir": "/path/to/codecli-channels/data",
-    "stateFile": "/path/to/codecli-channels/data/state.json",
-    "auditFile": "/path/to/codecli-channels/data/bridge-audit.jsonl"
-  }
-}
-```
-
-Notes:
-
-- Prefer `channels`, `channelIds`, and `allowedScopes` over the legacy `accounts`, `accountIds`, and `allowedTargets` fields.
-- Set `dataDir`, `stateFile`, and `auditFile` explicitly so runtime state ends up where you expect.
-- `bridge.backend` sets the default backend, but you can switch per conversation with `/backend use codex` or `/backend use claude`.
-- If `config/codecli-channels.json` is missing, the binary still falls back to `config/qqbot.json`.
-
-### 3. Run the bridge
-
-```bash
-go run ./cmd/codecli-channels -config ./config/codecli-channels.json
-```
-
-Or build first:
-
-```bash
-go build -o ./bin/codecli-channels ./cmd/codecli-channels
-./bin/codecli-channels -config ./config/codecli-channels.json
-```
-
-### 4. Verify the first conversation
-
-Recommended order:
-
-1. Confirm the log shows `QQ 网关 READY` if you started with QQ.
-2. Send `/help`.
-3. Send a plain message such as `Explain what this repository does`.
-4. After the first task completes, send `/history`.
-
-### Optional: onboard personal Weixin
-
-The repository includes built-in personal Weixin onboarding commands:
-
-```bash
-go run ./cmd/codecli-channels weixin setup -config ./config/codecli-channels.json
-```
-
-This flow prints a QR code in the terminal, waits for confirmation, and writes the resulting token plus the related `bridge.channelIds` and `bridge.allowedScopes` entries back into your config.
-
-If you already have a token:
-
-```bash
-go run ./cmd/codecli-channels weixin bind -config ./config/codecli-channels.json -token '<your-token>'
-```
-
-## Daily Usage
-
-Plain messages are the default work entrypoint. The bridge keeps using the current project, session, and backend unless you switch them.
-
-### General
-
-| Command | Description |
-| --- | --- |
-| `/help` | Show environment-control commands |
-| `/stop` | Interrupt the active task |
-| `/history` | Show recent task records for the current project |
-| plain message | Send work directly to the current backend |
-
-### Project
-
-| Command | Description |
-| --- | --- |
-| `/project list` | List configured projects |
-| `/project current` | Show the active project |
-| `/project use <alias>` | Switch project |
-
-### Session
-
-| Command | Description |
-| --- | --- |
-| `/session current` | Show the current session |
-| `/session list` | List sessions for the current project |
-| `/session new [name]` | Start a fresh session |
-| `/session switch <id>` | Switch to an existing session |
-
-### Backend
-
-| Command | Description |
-| --- | --- |
-| `/backend current` | Show the active backend |
-| `/backend list` | List available backends |
-| `/backend use <codex|claude>` | Switch backend |
-
-### Approval
-
-| Command | Description |
-| --- | --- |
-| `/approve` | Approve the current pending request |
-| `/approve session` | Approve and remember it for the current session |
-| `/deny` | Deny the current pending request |
-
-## Approval Model
-
-There are two approval layers:
-
-1. Bridge-level confirmation for obviously dangerous tasks such as `rm -rf`, `git reset --hard`, or `drop database`.
-2. Native backend approval forwarded from Codex while a turn is running.
-
-This keeps the bridge opinionated about high-risk requests without replacing the backend's own approval flow.
-
-## Repository Layout
-
-- `cmd/codecli-channels`: CLI entrypoint
-- `internal/app`: top-level command routing and `weixin setup` / `weixin bind`
-- `internal/bridge`: orchestration, command handling, approvals, history, reply behavior
-- `internal/channel`: channel abstractions plus QQ, Feishu, and Weixin drivers
-- `internal/codex`: Codex runners, including the `app-server` transport
-- `internal/claude`: Claude Code headless runner
-- `internal/config`: config loading, normalization, and compatibility helpers
-- `internal/store`: persistent mapping for project, backend, session, and thread state
-- `quickstart/`: channel onboarding guides
-
-## Limitations
-
-- Feishu and Weixin are still driver-specific MVPs, not full parity with QQ.
-- Personal Weixin support currently targets the iLink-style API used by this repository, not a generic public WeChat bot platform.
-- Weixin replies depend on stored `context_token` values from earlier inbound messages.
-- Backend interactive prompts that expect structured follow-up answers are not fully bridged yet.
-- This is a self-hosted bridge and assumes the same machine can access local repositories plus the required CLIs.
-
-## Documentation
-
-Primary project documentation lives in:
-
-- [`README.md`](README.md)
-- [`README.zh-CN.md`](README.zh-CN.md)
-- `quickstart/` for channel-specific onboarding notes
+| Command                       | Description |
+|-------------------------------| --- |
+| `/help`                       | Show available control commands |
+| `/project use <alias>`        | Switch project |
+| `/session new [name]`         | Start a new session |
+| `/backend use codex` / `/backend use claude` | Switch backend |
+| `/history`                    | Show recent task history |
+| `/stop`                       | Interrupt the active task |
 
 ## Development
 
-Run tests:
+Run tests with:
 
 ```bash
 go test ./...
 ```
-
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for contribution guidelines.
-
-## Roadmap
-
-- Better handling for interactive backend follow-up flows
-- Richer Feishu and Weixin message capabilities
-- Clearer startup diagnostics and config validation
-- Deployment examples for Docker / launchd / systemd
-- Continued GitHub open-source polish
-
-## License
 
 This repository is licensed under the [MIT License](LICENSE).
