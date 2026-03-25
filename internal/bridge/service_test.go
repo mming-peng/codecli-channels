@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +20,15 @@ type fakeChannelDriver struct {
 	platform string
 	replies  []string
 	sends    []string
+}
+
+type fakeTurnRunner struct {
+	mu       sync.Mutex
+	calls    int
+	lastOpts codex.TurnOptions
+	result   codex.TurnResult
+	err      error
+	calledCh chan codex.TurnOptions
 }
 
 func (d *fakeChannelDriver) ID() string { return d.id }
@@ -38,6 +48,26 @@ func (d *fakeChannelDriver) Send(_ context.Context, _ any, content string) error
 }
 
 func (d *fakeChannelDriver) Stop(context.Context) error { return nil }
+
+func (r *fakeTurnRunner) RunTurn(_ context.Context, opts codex.TurnOptions) (codex.TurnResult, error) {
+	r.mu.Lock()
+	r.calls++
+	r.lastOpts = opts
+	r.mu.Unlock()
+	if r.calledCh != nil {
+		select {
+		case r.calledCh <- opts:
+		default:
+		}
+	}
+	return r.result, r.err
+}
+
+func (r *fakeTurnRunner) CallCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
+}
 
 func TestExtractFailureSummary(t *testing.T) {
 	input := strings.Join([]string{
@@ -142,7 +172,7 @@ func TestBuildStatusTextIncludesRuntimeAndPendingState(t *testing.T) {
 		"项目：codecli-channels",
 		"后端：Codex",
 		"运行中：是",
-		"高风险确认：检测到 rm -rf 风险指令",
+		"高风险审批：检测到 rm -rf 风险指令",
 		"原生审批：命令执行审批",
 		"最近任务：success | 新增 /status 命令",
 	} {
@@ -311,13 +341,158 @@ func TestHandleMessageUsesGenericChannelDriver(t *testing.T) {
 		Scope:     channel.ConversationScope{Key: "test-main:dm:u1", Kind: "dm"},
 		Sender:    channel.Sender{ID: "u1"},
 		MessageID: "m1",
-		Text:      "/ping",
+		Text:      "/help",
 		ReplyRef:  "reply-1",
 	})
 	if len(driver.replies) != 1 {
 		t.Fatalf("expected one reply, got %d", len(driver.replies))
 	}
-	if !strings.Contains(driver.replies[0], "在线") {
-		t.Fatalf("expected health reply, got %q", driver.replies[0])
+	if !strings.Contains(driver.replies[0], "/history") {
+		t.Fatalf("expected help reply, got %q", driver.replies[0])
 	}
+}
+
+func TestHandleMessageRemovedCommandReturnsMigrationHint(t *testing.T) {
+	path := t.TempDir() + "/state.json"
+	stateStore, err := store.New(path)
+	if err != nil {
+		t.Fatalf("store.New error: %v", err)
+	}
+	runner := &fakeTurnRunner{}
+	cfg := &cfgpkg.Config{
+		Channels: map[string]cfgpkg.ChannelConfig{
+			"test-main": {Alias: "test-main", Type: "fake", Enabled: true},
+		},
+		Bridge: cfgpkg.BridgeConfig{
+			Backend:         "codex",
+			ChannelIDs:      []string{"test-main"},
+			AllowAllTargets: true,
+			MaxReplyChars:   200,
+			DefaultProject:  "codecli-channels",
+			Projects: map[string]cfgpkg.ProjectConfig{
+				"codecli-channels": {Alias: "codecli-channels", Description: "当前仓库", Path: "/tmp/project"},
+			},
+		},
+	}
+	driver := &fakeChannelDriver{id: "test-main", platform: "fake"}
+	service := &Service{
+		cfg:                  cfg,
+		logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+		store:                stateStore,
+		drivers:              map[string]channel.Driver{"test-main": driver},
+		codexRunner:          runner,
+		claudeRunner:         runner,
+		pendingConfirmations: map[string]PendingTask{},
+		nativeApprovals:      map[string]*nativeApprovalState{},
+		runningTasks:         map[string]*runningTaskState{},
+		busy:                 map[string]bool{},
+	}
+	service.handleMessage(context.Background(), channel.Message{
+		ChannelID: "test-main",
+		Platform:  "fake",
+		Scope:     channel.ConversationScope{Key: "test-main:dm:u1", Kind: "dm"},
+		Sender:    channel.Sender{ID: "u1"},
+		MessageID: "m1",
+		Text:      "/ask 看下项目结构",
+		ReplyRef:  "reply-1",
+	})
+	if len(driver.replies) != 1 {
+		t.Fatalf("expected one reply, got %d", len(driver.replies))
+	}
+	if !strings.Contains(driver.replies[0], "直接发普通消息") {
+		t.Fatalf("expected migration hint, got %q", driver.replies[0])
+	}
+	time.Sleep(20 * time.Millisecond)
+	if runner.CallCount() != 0 {
+		t.Fatalf("expected removed command not to dispatch task, got %d calls", runner.CallCount())
+	}
+}
+
+func TestApproveConfirmsPendingDangerousTask(t *testing.T) {
+	path := t.TempDir() + "/state.json"
+	stateStore, err := store.New(path)
+	if err != nil {
+		t.Fatalf("store.New error: %v", err)
+	}
+	calledCh := make(chan codex.TurnOptions, 1)
+	runner := &fakeTurnRunner{
+		result:   codex.TurnResult{ResponseText: "done"},
+		calledCh: calledCh,
+	}
+	cfg := &cfgpkg.Config{
+		Channels: map[string]cfgpkg.ChannelConfig{
+			"test-main": {Alias: "test-main", Type: "fake", Enabled: true},
+		},
+		Bridge: cfgpkg.BridgeConfig{
+			Backend:           "codex",
+			ChannelIDs:        []string{"test-main"},
+			AllowAllTargets:   true,
+			MaxReplyChars:     200,
+			DefaultProject:    "codecli-channels",
+			ConfirmationTTLMS: 60000,
+			Projects: map[string]cfgpkg.ProjectConfig{
+				"codecli-channels": {Alias: "codecli-channels", Description: "当前仓库", Path: "/tmp/project"},
+			},
+		},
+	}
+	driver := &fakeChannelDriver{id: "test-main", platform: "fake"}
+	service := &Service{
+		cfg:                  cfg,
+		logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+		store:                stateStore,
+		drivers:              map[string]channel.Driver{"test-main": driver},
+		codexRunner:          runner,
+		claudeRunner:         runner,
+		pendingConfirmations: map[string]PendingTask{},
+		nativeApprovals:      map[string]*nativeApprovalState{},
+		runningTasks:         map[string]*runningTaskState{},
+		busy:                 map[string]bool{},
+	}
+	msg := channel.Message{
+		ChannelID: "test-main",
+		Platform:  "fake",
+		Scope:     channel.ConversationScope{Key: "test-main:dm:u1", Kind: "dm"},
+		Sender:    channel.Sender{ID: "u1"},
+		MessageID: "m1",
+		ReplyRef:  "reply-1",
+	}
+	service.setPendingConfirmation(conversationKeyFromMessage(msg), PendingTask{
+		Mode:         "write",
+		Body:         "请执行 rm -rf build",
+		Reason:       "检测到 rm -rf 风险指令",
+		ProjectAlias: "codecli-channels",
+		ProjectPath:  "/tmp/project",
+		ExpiresAt:    time.Now().Add(time.Minute),
+	})
+
+	service.handleMessage(context.Background(), channel.Message{
+		ChannelID: "test-main",
+		Platform:  "fake",
+		Scope:     msg.Scope,
+		Sender:    msg.Sender,
+		MessageID: "m2",
+		Text:      "/approve",
+		ReplyRef:  "reply-2",
+	})
+
+	select {
+	case opts := <-calledCh:
+		if opts.Prompt != "请执行 rm -rf build" {
+			t.Fatalf("expected pending task body to run, got %q", opts.Prompt)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected approve to dispatch pending dangerous task")
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		service.mu.Lock()
+		busy := service.busy[conversationKeyFromMessage(msg)]
+		service.mu.Unlock()
+		if service.currentRunningTask(conversationKeyFromMessage(msg)) == nil && !busy {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("expected background task to finish before test cleanup")
 }

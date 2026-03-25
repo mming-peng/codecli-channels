@@ -6,7 +6,7 @@ Thanks for your interest in contributing to `codecli-channels`.
 
 Requirements:
 
-- Go `1.22+`
+- Go `1.25+`
 - A working `codex` CLI installation
 - Optional: QQ bot credentials if you want to run real integration tests
 
@@ -55,6 +55,8 @@ If you change commands, config behavior, approval flow, or transport behavior, u
 
 - `README.md`
 - `README.zh-CN.md`
+- `docs/project-overview.md`
+- `docs/project-overview.zh-CN.md`
 - files under `docs/`
 
 ## Security

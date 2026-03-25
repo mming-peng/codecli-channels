@@ -148,16 +148,9 @@ func (s *Service) handleMessage(ctx context.Context, msg channelpkg.Message) {
 	text := strings.TrimSpace(msg.Text)
 	s.logger.Info("收到 channel 消息", "channelId", msg.ChannelID, "platform", msg.Platform, "scope", msg.Scope.Key, "senderId", messageSenderID(msg), "text", trimForLog(text, 200))
 	switch {
-	case text == "/ping":
-		backend := s.resolveBackend(conversationKeyFromMessage(msg))
-		s.reply(ctx, msg, fmt.Sprintf("pong，codecli-channels 在线（当前平台：%s，后端：%s）。", strings.ToUpper(msg.Platform), backendLabel(backend)))
-		return
 	case text == "/help":
 		backend := s.resolveBackend(conversationKeyFromMessage(msg))
 		s.reply(ctx, msg, fmt.Sprintf("当前后端：%s\n\n%s", backendLabel(backend), BuildHelpText(s.cfg.Bridge)))
-		return
-	case text == "/status":
-		s.handleStatusCommand(ctx, msg)
 		return
 	case text == "/stop":
 		s.handleStopCommand(ctx, msg)
@@ -171,14 +164,8 @@ func (s *Service) handleMessage(ctx context.Context, msg channelpkg.Message) {
 	case strings.HasPrefix(text, "/backend"):
 		s.handleBackendCommand(ctx, msg)
 		return
-	case text == "/clear":
-		s.handleClearCommand(ctx, msg)
-		return
 	case strings.HasPrefix(text, "/session"):
 		s.handleSessionCommand(ctx, msg)
-		return
-	case strings.HasPrefix(text, "/mode"):
-		s.handleModeCommand(ctx, msg)
 		return
 	case text == "/approve" || strings.HasPrefix(text, "/approve "):
 		s.handleApprove(ctx, msg, text)
@@ -192,33 +179,21 @@ func (s *Service) handleMessage(ctx context.Context, msg channelpkg.Message) {
 		return
 	}
 
-	parsed := ParseBridgeCommand(text, s.cfg.Bridge)
-	if parsed.Type == "unmatched" {
-		implicitMode, err := s.resolveImplicitRunMode(msg)
-		if err != nil {
-			s.reply(ctx, msg, fmt.Sprintf("加载会话失败：%v", err))
-			return
-		}
-		if implicitMode == "read" || implicitMode == "write" {
-			s.dispatchTask(ctx, msg, implicitMode, text, false)
-			return
-		}
-		hint := "消息已收到，但没有匹配到可执行模式。"
-		if s.cfg.Bridge.RequireCommandPrefix {
-			hint = fmt.Sprintf("请使用 %s 或 %s 开头。\n\n%s", parsed.ReadOnlyPrefixes[0], parsed.WritePrefixes[0], BuildHelpText(s.cfg.Bridge))
-		}
-		s.reply(ctx, msg, hint)
+	if _, reply, ok := MatchRemovedCommand(text); ok {
+		s.reply(ctx, msg, reply)
 		return
 	}
-	if parsed.Type == "confirm" {
-		s.handleConfirm(ctx, msg)
+
+	implicitMode, err := s.resolveImplicitRunMode(msg)
+	if err != nil {
+		s.reply(ctx, msg, fmt.Sprintf("加载会话失败：%v", err))
 		return
 	}
-	if parsed.Body == "" {
-		s.reply(ctx, msg, "前缀后面还需要跟具体需求。")
+	if implicitMode == "read" || implicitMode == "write" {
+		s.dispatchTask(ctx, msg, implicitMode, text, false)
 		return
 	}
-	s.dispatchTask(ctx, msg, parsed.Mode, parsed.Body, false)
+	s.reply(ctx, msg, "消息已收到，但当前没有可执行模式。\n\n"+BuildHelpText(s.cfg.Bridge))
 }
 
 func (s *Service) handleProjectCommand(ctx context.Context, msg channelpkg.Message) {
@@ -378,6 +353,8 @@ func (s *Service) handleSessionCommand(ctx context.Context, msg channelpkg.Messa
 			s.reply(ctx, msg, fmt.Sprintf("创建会话失败：%v", err))
 			return
 		}
+		s.clearPendingConfirmation(conversationKey)
+		s.clearNativeApproval(conversationKey)
 		s.reply(ctx, msg, fmt.Sprintf("已创建会话：%s (%s)", item.Name, item.ID))
 	case "switch":
 		if len(parts) < 3 {
@@ -389,6 +366,8 @@ func (s *Service) handleSessionCommand(ctx context.Context, msg channelpkg.Messa
 			s.reply(ctx, msg, err.Error())
 			return
 		}
+		s.clearPendingConfirmation(conversationKey)
+		s.clearNativeApproval(conversationKey)
 		s.reply(ctx, msg, fmt.Sprintf("已切换到会话：%s (%s)", item.Name, item.ID))
 	default:
 		s.reply(ctx, msg, "支持：/session list | /session current | /session new [名称] | /session switch <id>")
@@ -447,7 +426,7 @@ func (s *Service) handleHistoryCommand(ctx context.Context, msg channelpkg.Messa
 			continue
 		}
 		switch event.Status {
-		case "success", "failed", "stopped", "awaiting_confirm":
+		case "success", "failed", "stopped", "awaiting_confirm", "awaiting_approval":
 			filtered = append(filtered, event)
 		}
 	}
@@ -474,6 +453,9 @@ func (s *Service) handleApprove(ctx context.Context, msg channelpkg.Message, tex
 		s.reply(ctx, msg, "支持：/approve 或 /approve session")
 		return
 	}
+	if s.resolvePendingConfirmationDecision(ctx, msg, decision) {
+		return
+	}
 	if s.resolveNativeApproval(conversationKeyFromMessage(msg), decision) {
 		return
 	}
@@ -484,6 +466,9 @@ func (s *Service) handleDeny(ctx context.Context, msg channelpkg.Message, text s
 	decision, ok := parseDenyCommandDecision(text)
 	if !ok {
 		s.reply(ctx, msg, "支持：/deny")
+		return
+	}
+	if s.resolvePendingConfirmationDecision(ctx, msg, decision) {
 		return
 	}
 	if s.resolveNativeApproval(conversationKeyFromMessage(msg), decision) {
@@ -710,7 +695,7 @@ func (s *Service) requestDangerousTaskConfirmation(ctx context.Context, msg chan
 		ExpiresAt:    time.Now().Add(time.Duration(s.cfg.Bridge.ConfirmationTTLMS) * time.Millisecond),
 	})
 	s.auditIfEnabled(AuditEvent{
-		Status:       "awaiting_confirm",
+		Status:       "awaiting_approval",
 		Reason:       danger.Reason,
 		AccountID:    msg.ChannelID,
 		ChatType:     messageTargetType(msg),
@@ -721,12 +706,7 @@ func (s *Service) requestDangerousTaskConfirmation(ctx context.Context, msg chan
 		Mode:         mode,
 		Text:         body,
 	})
-	confirmPrefixes := normalizePrefixes(s.cfg.Bridge.ConfirmPrefixes, defaultConfirmPrefixes)
-	confirmCommand := defaultConfirmPrefixes[0]
-	if len(confirmPrefixes) > 0 {
-		confirmCommand = confirmPrefixes[0]
-	}
-	s.reply(ctx, msg, fmt.Sprintf("%s\n\n检测到高风险写操作。回复 `%s` 后我再继续执行。", danger.Reason, confirmCommand))
+	s.reply(ctx, msg, fmt.Sprintf("%s\n\n检测到高风险写操作。回复 `/approve` 继续，回复 `/deny` 取消。", danger.Reason))
 	return true
 }
 
@@ -914,11 +894,36 @@ func (s *Service) resolveNativeApproval(key string, decision codex.ApprovalDecis
 	return true
 }
 
-func (s *Service) handleNaturalApproval(_ context.Context, msg channelpkg.Message, text string) bool {
+func (s *Service) handleNaturalApproval(ctx context.Context, msg channelpkg.Message, text string) bool {
 	if decision, ok := parseNaturalApprovalDecision(text); ok {
+		if s.resolvePendingConfirmationDecision(ctx, msg, decision) {
+			return true
+		}
 		return s.resolveNativeApproval(conversationKeyFromMessage(msg), decision)
 	}
 	return false
+}
+
+func (s *Service) resolvePendingConfirmationDecision(ctx context.Context, msg channelpkg.Message, decision codex.ApprovalDecision) bool {
+	conversationKey := conversationKeyFromMessage(msg)
+	pending, ok := s.getPendingConfirmation(conversationKey)
+	if !ok {
+		return false
+	}
+	switch decision {
+	case codex.ApprovalAllow, codex.ApprovalAllowForSession:
+		if pending.ProjectAlias != "" {
+			_ = s.store.SetProjectAlias(conversationKey, pending.ProjectAlias)
+		}
+		s.clearPendingConfirmation(conversationKey)
+		s.dispatchTask(ctx, msg, pending.Mode, pending.Body, true)
+	case codex.ApprovalDeny, codex.ApprovalCancel:
+		s.clearPendingConfirmation(conversationKey)
+		s.reply(ctx, msg, "已取消待审批的高风险任务。")
+	default:
+		return false
+	}
+	return true
 }
 
 func isAllowResponse(text string) bool {

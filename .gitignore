@@ -4,8 +4,14 @@
 logs/
 .DS_Store
 .idea/
-docs/
+docs/*
+!docs/project-overview.md
+!docs/project-overview.zh-CN.md
 
+# Local runtime configs and backups.
+config/codecli-channels.json
 config/qqbot.json
-config/config/data/
+config/*.before-*.bak
+config/config/
+config/data/
 bin/

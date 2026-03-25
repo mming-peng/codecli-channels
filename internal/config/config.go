@@ -207,11 +207,13 @@ func (c *Config) Normalize(baseDir string) error {
 }
 
 func (c *Config) normalizeLegacyChannels() {
-	if len(c.Channels) > 0 {
-		return
+	if c.Channels == nil {
+		c.Channels = make(map[string]ChannelConfig, len(c.Accounts))
 	}
-	c.Channels = make(map[string]ChannelConfig, len(c.Accounts))
 	for alias, account := range c.Accounts {
+		if _, exists := c.Channels[alias]; exists {
+			continue
+		}
 		c.Channels[alias] = ChannelConfig{
 			Alias:   alias,
 			Type:    "qq",

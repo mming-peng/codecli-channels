@@ -1,63 +1,71 @@
 # codecli-channels
 
-把聊天 channel 变成远程 Codex / Claude Code 工作台。
+把聊天 channel 变成远程 Codex / Claude Code 编码工作台。
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-`codecli-channels` 是一个面向 Code CLI 的本地 channels bridge。当前它已经完成多平台通道内核重构，并把 **QQ channel** 接到 **本机 Codex**；后续的 **Feishu** 与 **个人微信** 会以独立 driver 的形式接入，而不是继续修改 bridge 核心。
+`codecli-channels` 是一个自托管的本地 bridge，用来把聊天渠道接到本机上的编码 CLI。它会把每个会话稳定映射到本地项目、bridge session 和后端线程，让你可以直接从 QQ、飞书或个人微信里继续做真实开发任务，而不是每次都重新建立上下文。
 
-它不是普通问答机器人，更适合真实项目协作：项目切换、会话连续性、原生审批转发、受控可写执行、状态可见性和任务中断能力，都是设计的一部分。QQ 是当前第一个 channel，而不是产品的长期边界。
+它不是普通问答机器人封装，更像一个“聊天端入口 + 本地执行上下文层”。项目切换、会话连续性、审批转发、可控写权限、任务回看和中断，都是一等能力。
 
-## 特性
+## 为什么做这个项目
 
-- 通过官方 API 接入 QQ channel，不依赖 OneBot
-- channel 会话到本地 session 和 Codex thread 的持久映射
-- 多个本地项目工作区
-- 在聊天端处理 Codex 原生审批
-- 可选 Claude Code 后端（`claude -p` headless 模式）
-- `/status` 查看当前项目/会话/模式/审批状态
-- `/ask` 只读分析
-- `/run` 可写执行
-- `/stop` 中断当前任务
-- `/history` 回看最近任务
-- `/session` 会话管理
-- `/project` 项目切换
-- 较慢任务会先回“收到，正在处理…”
-- 主传输层采用 `codex app-server` over stdio JSON-RPC
+- 把 `channel 会话 -> 本地项目 -> bridge session -> Codex / Claude 线程` 这条映射链固定下来。
+- 让普通聊天消息成为默认工作入口，而不是把体验建立在一堆命令前缀上。
+- 把后端审批请求回挂到聊天端，让高风险动作仍然可见、可控。
+- 用统一 bridge core 承接多个 channel driver，而不是把项目绑定死在单一平台上。
+- 把个人微信扫码拿 token 这类初始化流程和运行期消息桥接解耦。
 
-## 架构
+## 当前状态
+
+| 领域 | 状态 | 说明 |
+| --- | --- | --- |
+| QQ | 可用 | 基于官方 bot API 和 gateway，不依赖 OneBot |
+| 飞书 | 文本 MVP | 已有文本消息链路，支持群聊/线程隔离选项 |
+| 个人微信 | 文本 MVP | 内建二维码与 token 绑定流程，文本收发链路已打通 |
+| Codex 后端 | 主路径 | 基于 `codex app-server` 的 stdio JSON-RPC |
+| Claude 后端 | 可选支持 | 基于 `claude -p` headless 模式 |
+
+需要对外明确的边界：
+
+- 飞书和微信目前都还是以文本能力为主。
+- 微信媒体消息还没有进入媒体工作流，只会做保守降级。
+- 后端发起的 `request_user_input` 和 MCP elicitation 这类交互式追问，bridge 还没有完整承接。
+
+## 工作原理
 
 ```text
 Channel Driver
-  -> 本地项目
-  -> bridge session
-  -> Codex thread
-  -> codex app-server
+  -> 统一的 channel.Message
+  -> bridge service
+  -> 本地项目 + 持久化 session
+  -> Codex / Claude runner
+  -> 回复和审批再回到聊天端
 ```
 
-这样可以在多轮消息中保留上下文、隔离不同项目，并把审批准确地挂回到正确的 channel 会话。
+核心思路是让 bridge 负责路由、状态和会话连续性，channel driver 只处理各平台自己的协议细节。
 
 ## 快速开始
 
 ### 环境要求
 
-- Go `1.22+`
-- 已安装并可用的 `codex` CLI（当 `bridge.backend=codex`）
-- `codex` 已完成登录（当 `bridge.backend=codex`）
-- 已安装并可用的 `claude`（Claude Code CLI，当 `bridge.backend=claude`）
-- Claude Code 已完成登录（当 `bridge.backend=claude`）
-- QQ 机器人 `appId` / `clientSecret`
-- 能访问你要暴露的本地项目目录
+- Go `1.25+`
+- 如果使用 `bridge.backend=codex`，需要本机已安装可用的 `codex`
+- 如果使用 Codex 后端，需要本机已完成 Codex 登录
+- 如果使用 `bridge.backend=claude`，需要本机已安装可用的 `claude`
+- 如果使用 Claude 后端，需要本机已完成 Claude Code 登录
+- 至少准备一个要启用的 channel 凭据
+- 本机能访问你想暴露给 bridge 的项目目录
 
-### 1. 创建配置文件
+### 1. 复制示例配置
 
 ```bash
 cp config/codecli-channels.example.json config/codecli-channels.json
 ```
 
-### 2. 填写凭据和路径
+### 2. 填写凭据、作用域和项目路径
 
-最小示例：
+一个面向 QQ 的最小示例：
 
 ```json
 {
@@ -82,13 +90,10 @@ cp config/codecli-channels.example.json config/codecli-channels.json
       "default:user:YOUR_OPENID"
     ],
     "requireCommandPrefix": true,
-    "readOnlyPrefixes": ["/ask", "/read", "问问"],
-    "writePrefixes": ["/run", "/exec", "执行"],
-    "confirmPrefixes": ["/confirm", "/确认"],
     "projects": {
       "codecli-channels": {
         "path": "/path/to/codecli-channels",
-        "description": "channels bridge（当前启用 QQ channel）"
+        "description": "channels bridge"
       }
     },
     "defaultProject": "codecli-channels",
@@ -106,10 +111,12 @@ cp config/codecli-channels.example.json config/codecli-channels.json
 }
 ```
 
-> 强烈建议显式设置 `dataDir`、`stateFile`、`auditFile`。
-> 旧字段 `qqMaxReplyChars` 仍然兼容，但推荐改用 `maxReplyChars`。
-> 旧字段 `accounts`、`accountIds`、`allowedTargets` 仍然兼容，但推荐迁移到 `channels`、`channelIds`、`allowedScopes`。
-> `bridge.backend` 是默认后端；也可以在 QQ 里用 `/backend use codex|claude` 按会话切换。
+补充说明：
+
+- 新配置优先使用 `channels`、`channelIds`、`allowedScopes`，旧字段 `accounts`、`accountIds`、`allowedTargets` 仍兼容。
+- 建议显式设置 `dataDir`、`stateFile`、`auditFile`，避免运行期状态落到你意料之外的位置。
+- `bridge.backend` 只决定默认后端，实际聊天中仍可用 `/backend use codex` 或 `/backend use claude` 按会话切换。
+- 如果 `config/codecli-channels.json` 不存在，程序仍会回退读取 `config/qqbot.json`。
 
 ### 3. 启动 bridge
 
@@ -124,34 +131,43 @@ go build -o ./bin/codecli-channels ./cmd/codecli-channels
 ./bin/codecli-channels -config ./config/codecli-channels.json
 ```
 
-### 4. 首次验证
+### 4. 验证第一条会话
 
-建议按这个顺序验收：
+建议按这个顺序：
 
-1. 观察日志出现 `QQ 网关 READY`
-2. 在 QQ 中发送 `/ping`
-3. 发送 `/status`
-4. 发送 `/ask 帮我解释一下这个项目是做什么的`
+1. 如果你先接的是 QQ，确认日志出现 `QQ 网关 READY`。
+2. 发送 `/help`。
+3. 直接发送普通消息，例如 `解释一下这个仓库是做什么的`。
+4. 第一条任务完成后发送 `/history`。
 
-如果你本地已经有旧的 `config/qqbot.json`，新二进制在找不到 `config/codecli-channels.json` 时会自动回退到旧路径。
+### 可选：接入个人微信
 
-## 命令
+仓库内已经内建个人微信初始化命令：
+
+```bash
+go run ./cmd/codecli-channels weixin setup -config ./config/codecli-channels.json
+```
+
+这个流程会在终端打印二维码，等待扫码确认，并把得到的 token 以及对应的 `bridge.channelIds`、`bridge.allowedScopes` 自动回写到配置里。
+
+如果你已经有 token：
+
+```bash
+go run ./cmd/codecli-channels weixin bind -config ./config/codecli-channels.json -token '<你的token>'
+```
+
+## 日常使用
+
+普通消息就是默认工作入口。bridge 会沿用当前项目、当前会话和当前后端继续执行，除非你主动切换。
 
 ### 通用命令
 
 | 命令 | 说明 |
 | --- | --- |
-| `/ping` | 健康检查 |
-| `/help` | 查看帮助 |
-| `/status` | 查看当前项目、会话、模式、审批和运行状态 |
-| `/stop` | 停止当前正在执行的任务 |
-| `/history` | 查看当前项目最近任务 |
-| `/backend current` | 查看当前后端 |
-| `/backend use <codex\|claude>` | 切换后端 |
-| `/clear` | 开一个新会话 |
-| `/mode` | 查看当前默认模式 |
-| `/mode write` | 把当前会话默认模式切到可写执行 |
-| `/mode read` | 把当前会话默认模式切到只读分析 |
+| `/help` | 查看环境控制命令 |
+| `/stop` | 中断当前任务 |
+| `/history` | 查看当前项目最近任务记录 |
+| 普通消息 | 直接把任务交给当前后端 |
 
 ### 项目命令
 
@@ -166,93 +182,72 @@ go build -o ./bin/codecli-channels ./cmd/codecli-channels
 | 命令 | 说明 |
 | --- | --- |
 | `/session current` | 查看当前会话 |
-| `/session list` | 查看当前项目下的会话，并带最近任务摘要 |
-| `/session new [名称]` | 新建会话 |
-| `/session switch <id>` | 切换会话 |
+| `/session list` | 查看当前项目下的会话 |
+| `/session new [name]` | 开一个全新的会话 |
+| `/session switch <id>` | 切换到已有会话 |
 
-### 执行命令
+### 后端命令
 
 | 命令 | 说明 |
 | --- | --- |
-| `/ask <问题>` | 只读分析 |
-| `/run <任务>` | 可写执行 |
-| 普通消息 | 按当前会话模式执行；首次自动建会话时初始值来自 `implicitMessageMode` |
+| `/backend current` | 查看当前后端 |
+| `/backend list` | 查看可用后端 |
+| `/backend use <codex|claude>` | 切换后端 |
+
+### 审批命令
+
+| 命令 | 说明 |
+| --- | --- |
+| `/approve` | 同意当前待处理审批 |
+| `/approve session` | 同意并记忆到本会话 |
+| `/deny` | 拒绝当前待处理审批 |
 
 ## 审批模型
 
-这里有两层审批。
+项目里有两层审批：
 
-### bridge 层确认
+1. bridge 自己的高风险确认，例如 `rm -rf`、`git reset --hard`、`drop database`
+2. Codex 执行过程中的原生审批请求
 
-对于明显危险的任务，bridge 可能要求先发：
+这样做的目的，是在不替代后端原生审批的前提下，对明显危险的任务保持更强的保护。
 
-- `/confirm`
+## 仓库结构
 
-常见高风险关键词包括：
+- `cmd/codecli-channels`：CLI 入口
+- `internal/app`：顶层命令路由，以及 `weixin setup` / `weixin bind`
+- `internal/bridge`：调度、命令处理、审批、历史记录、回包行为
+- `internal/channel`：通道抽象，以及 QQ、飞书、微信 driver
+- `internal/codex`：Codex runner，包括 `app-server` 传输层
+- `internal/claude`：Claude Code headless runner
+- `internal/config`：配置加载、归一化和兼容逻辑
+- `internal/store`：项目、后端、会话、线程状态的持久化
+- `docs/`：对外文档，以及带日期的设计/计划记录
 
-- `rm -rf`
-- `git reset --hard`
-- `drop database`
-- `truncate table`
-- `sudo`
+## 当前限制
 
-这不是 Codex 原生审批，而是 bridge 自己的保护。
-
-### Codex 原生审批
-
-当 Codex 在执行中触发审批时，bridge 会把请求转发到 QQ。
-
-支持的回复：
-
-- `/approve`
-- `/approve session`
-- `/deny`
-- `同意`
-- `拒绝`
-- `本会话允许`
-- `yes`
-- `no`
-
-## 响应行为
-
-### 慢任务提示
-
-如果大约 2 秒内还没有最终答案，bridge 可能先回：
-
-```text
-收到，正在处理…
-```
-
-这主要改善的是体感速度。
-
-### 首个最终答案优先回包
-
-一旦拿到第一个 `final_answer`，bridge 会优先把它发回 QQ，而不是等待所有尾部生命周期事件结束。
-
-### 长回复自动分段
-
-长回复会根据 `maxReplyChars` 自动分段发送；旧字段 `qqMaxReplyChars` 仍然兼容。
-
-### 状态与回看
-
-中途想重新对齐上下文时，优先用这 3 个命令：
-
-- `/status`：看当前项目、会话、模式、审批和是否还在执行
-- `/stop`：想改方向时主动停止当前任务
-- `/history`：回看当前项目最近做过什么
+- 飞书和微信仍然是各自独立演进的 MVP，能力并未完全对齐 QQ。
+- 个人微信接入当前面向本仓库使用的 iLink 风格接口，并不是一个通用公开微信机器人方案。
+- 微信回包依赖此前入站消息携带并持久化下来的 `context_token`。
+- 后端如果要求结构化追问，当前 bridge 还不能完整承接。
+- 这是一个自托管 bridge，默认假设运行机器同时能访问本地仓库和所需 CLI。
 
 ## 文档
 
-更多文档在 [`docs/`](docs/README.md)：
+建议从这里开始：
 
-- [`docs/README.md`](docs/README.md)
-- [`docs/README.zh-CN.md`](docs/README.zh-CN.md)
-- [`docs/architecture.md`](docs/architecture.md)
+- [`docs/project-overview.zh-CN.md`](docs/project-overview.zh-CN.md)
 - [`docs/architecture.zh-CN.md`](docs/architecture.zh-CN.md)
-- [`docs/configuration.md`](docs/configuration.md)
 - [`docs/configuration.zh-CN.md`](docs/configuration.zh-CN.md)
-- [`docs/troubleshooting.md`](docs/troubleshooting.md)
 - [`docs/troubleshooting.zh-CN.md`](docs/troubleshooting.zh-CN.md)
+- [`docs/README.zh-CN.md`](docs/README.zh-CN.md)
+
+英文文档：
+
+- [`docs/project-overview.md`](docs/project-overview.md)
+- [`docs/architecture.md`](docs/architecture.md)
+- [`docs/configuration.md`](docs/configuration.md)
+- [`docs/troubleshooting.md`](docs/troubleshooting.md)
+- [`docs/README.md`](docs/README.md)
 
 ## 开发
 
@@ -262,13 +257,13 @@ go build -o ./bin/codecli-channels ./cmd/codecli-channels
 go test ./...
 ```
 
-贡献方式见：[`CONTRIBUTING.md`](CONTRIBUTING.md)
+贡献说明见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
 
 ## Roadmap
 
-- 为短 `/ask` 请求提供更快的模型路径
-- 改进流式回包策略
-- 提供更清晰的配置校验和启动诊断
+- 更好地处理后端交互式追问
+- 补齐飞书和微信的富消息能力
+- 提供更清晰的启动诊断和配置校验
 - 补充 Docker / launchd / systemd 部署示例
 - 继续完善 GitHub 开源仓库配套
 

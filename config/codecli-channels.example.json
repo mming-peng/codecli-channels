@@ -34,15 +34,13 @@
   "bridge": {
     "enabled": true,
     "backend": "codex",
-    "channelIds": ["default"],
+    "channelIds": ["default", "weixin-main"],
     "allowAllTargets": false,
     "allowedScopes": [
-      "default:user:你的openid"
+      "default:user:你的openid",
+      "weixin-main:dm:user@im.wechat"
     ],
     "requireCommandPrefix": true,
-    "readOnlyPrefixes": ["/ask", "/read", "问问"],
-    "writePrefixes": ["/run", "/exec", "执行"],
-    "confirmPrefixes": ["/confirm", "/确认"],
     "projects": {
       "feishu-connect": {
         "path": "/Users/ming/ai/feishu-connect",

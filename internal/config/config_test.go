@@ -68,6 +68,41 @@ func TestNormalizePreservesExplicitChannels(t *testing.T) {
 	}
 }
 
+func TestNormalizeMergesLegacyAccountsIntoExistingChannels(t *testing.T) {
+	cfg := &Config{
+		Accounts: map[string]Account{
+			"default": {Enabled: true, AppID: "app", ClientSecret: "secret"},
+		},
+		Channels: map[string]ChannelConfig{
+			"weixin-main": {
+				Type:    "weixin",
+				Enabled: true,
+				Options: map[string]any{"token": "token"},
+			},
+		},
+		Bridge: BridgeConfig{
+			Backend:        "codex",
+			ChannelIDs:     []string{"default", "weixin-main"},
+			AllowedScopes:  []string{"default:user:u1", "weixin-main:dm:user@im.wechat"},
+			Projects:       map[string]ProjectConfig{"demo": {Path: "."}},
+			DefaultProject: "demo",
+		},
+	}
+	if err := cfg.Normalize("."); err != nil {
+		t.Fatalf("Normalize error: %v", err)
+	}
+	defaultChannel, ok := cfg.Channels["default"]
+	if !ok {
+		t.Fatal("expected legacy default account to be merged into channels")
+	}
+	if defaultChannel.Type != "qq" {
+		t.Fatalf("expected merged legacy channel type qq, got %s", defaultChannel.Type)
+	}
+	if got := cfg.Channels["weixin-main"].Type; got != "weixin" {
+		t.Fatalf("expected explicit channel to remain weixin, got %s", got)
+	}
+}
+
 func TestNormalizeReplyCharSettings(t *testing.T) {
 	t.Run("prefer maxReplyChars when present", func(t *testing.T) {
 		cfg := &Config{

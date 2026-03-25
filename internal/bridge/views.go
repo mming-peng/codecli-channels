@@ -139,7 +139,7 @@ func buildStatusText(view statusView) string {
 	if strings.TrimSpace(view.ProgressText) != "" {
 		lines = append(lines, "最近进度："+view.ProgressText)
 	}
-	lines = append(lines, "高风险确认："+fallbackText(view.PendingConfirmReason, "无"))
+	lines = append(lines, "高风险审批："+fallbackText(view.PendingConfirmReason, "无"))
 	lines = append(lines, "原生审批："+fallbackText(view.PendingApprovalTitle, "无"))
 	if view.LastTaskStatus != "" || view.LastTaskSummary != "" {
 		lines = append(lines, fmt.Sprintf("最近任务：%s | %s", fallbackText(view.LastTaskStatus, "-"), fallbackText(view.LastTaskSummary, "-")))
@@ -169,7 +169,7 @@ func buildProjectListText(projects []cfgpkg.ProjectConfig, currentAlias string) 
 
 func buildSessionListText(projectAlias string, items []*store.SessionRecord, currentID string) string {
 	if len(items) == 0 {
-		return fmt.Sprintf("项目 %s 下还没有会话，先发一条普通消息或 /run 即可自动创建。", projectAlias)
+		return fmt.Sprintf("项目 %s 下还没有会话，先发一条普通消息即可自动创建。", projectAlias)
 	}
 	lines := []string{fmt.Sprintf("项目 %s 的会话：", projectAlias)}
 	for _, item := range items {

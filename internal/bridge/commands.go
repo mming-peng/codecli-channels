@@ -1,27 +1,10 @@
 package bridge
 
 import (
-	"fmt"
 	"strings"
 
 	cfgpkg "codecli-channels/internal/config"
 )
-
-var (
-	defaultReadOnlyPrefixes = []string{"/ask", "/read", "问问"}
-	defaultWritePrefixes    = []string{"/run", "/exec", "执行"}
-	defaultConfirmPrefixes  = []string{"/confirm", "/确认"}
-)
-
-type ParsedCommand struct {
-	Type             string
-	Mode             string
-	Body             string
-	Prefix           string
-	ReadOnlyPrefixes []string
-	WritePrefixes    []string
-	ConfirmPrefixes  []string
-}
 
 type DangerousMatch struct {
 	Matched bool
@@ -31,6 +14,11 @@ type DangerousMatch struct {
 type dangerRule struct {
 	Needle string
 	Reason string
+}
+
+type removedCommand struct {
+	Prefixes []string
+	Reply    string
 }
 
 var dangerRules = []dangerRule{
@@ -43,19 +31,23 @@ var dangerRules = []dangerRule{
 	{Needle: "清空目录", Reason: "检测到大范围清理风险描述"},
 }
 
-func normalizePrefixes(values, fallbacks []string) []string {
-	source := values
-	if len(source) == 0 {
-		source = fallbacks
-	}
-	out := make([]string, 0, len(source))
-	for _, item := range source {
-		item = strings.TrimSpace(item)
-		if item != "" {
-			out = append(out, item)
-		}
-	}
-	return out
+var removedCommands = []removedCommand{
+	{
+		Prefixes: []string{"/ask", "/read", "问问", "/run", "/exec", "执行"},
+		Reply:    "这些命令已移除。直接发普通消息即可，我会把内容交给当前后端继续处理。",
+	},
+	{
+		Prefixes: []string{"/ping", "/status", "/mode"},
+		Reply:    "这个命令已移除。需要查看或切换环境时，请使用 /help 里的 /project、/session、/backend、/history、/stop。",
+	},
+	{
+		Prefixes: []string{"/clear"},
+		Reply:    "这个命令已移除。需要结束当前上下文时，请使用 `/session new [名称]`。",
+	},
+	{
+		Prefixes: []string{"/confirm", "/确认"},
+		Reply:    "`/confirm` 已移除。遇到待审批或高风险任务时，请直接回复 `/approve` 或 `/deny`。",
+	},
 }
 
 func matchPrefix(text string, prefixes []string) (string, string, bool) {
@@ -70,25 +62,14 @@ func matchPrefix(text string, prefixes []string) (string, string, bool) {
 	return "", "", false
 }
 
-func ParseBridgeCommand(text string, cfg cfgpkg.BridgeConfig) ParsedCommand {
+func MatchRemovedCommand(text string) (string, string, bool) {
 	normalized := strings.TrimSpace(text)
-	readPrefixes := normalizePrefixes(cfg.ReadOnlyPrefixes, defaultReadOnlyPrefixes)
-	writePrefixes := normalizePrefixes(cfg.WritePrefixes, defaultWritePrefixes)
-	confirmPrefixes := normalizePrefixes(cfg.ConfirmPrefixes, defaultConfirmPrefixes)
-
-	if !cfg.RequireCommandPrefix {
-		return ParsedCommand{Type: "execute", Mode: "write", Body: normalized, ReadOnlyPrefixes: readPrefixes, WritePrefixes: writePrefixes, ConfirmPrefixes: confirmPrefixes}
+	for _, spec := range removedCommands {
+		if prefix, _, ok := matchPrefix(normalized, spec.Prefixes); ok {
+			return prefix, spec.Reply, true
+		}
 	}
-	if prefix, body, ok := matchPrefix(normalized, confirmPrefixes); ok {
-		return ParsedCommand{Type: "confirm", Mode: "write", Body: body, Prefix: prefix, ReadOnlyPrefixes: readPrefixes, WritePrefixes: writePrefixes, ConfirmPrefixes: confirmPrefixes}
-	}
-	if prefix, body, ok := matchPrefix(normalized, readPrefixes); ok {
-		return ParsedCommand{Type: "execute", Mode: "read", Body: body, Prefix: prefix, ReadOnlyPrefixes: readPrefixes, WritePrefixes: writePrefixes, ConfirmPrefixes: confirmPrefixes}
-	}
-	if prefix, body, ok := matchPrefix(normalized, writePrefixes); ok {
-		return ParsedCommand{Type: "execute", Mode: "write", Body: body, Prefix: prefix, ReadOnlyPrefixes: readPrefixes, WritePrefixes: writePrefixes, ConfirmPrefixes: confirmPrefixes}
-	}
-	return ParsedCommand{Type: "unmatched", Body: normalized, ReadOnlyPrefixes: readPrefixes, WritePrefixes: writePrefixes, ConfirmPrefixes: confirmPrefixes}
+	return "", "", false
 }
 
 func DetectDangerousTask(text string) DangerousMatch {
@@ -102,42 +83,29 @@ func DetectDangerousTask(text string) DangerousMatch {
 }
 
 func BuildHelpText(cfg cfgpkg.BridgeConfig) string {
-	readPrefixes := normalizePrefixes(cfg.ReadOnlyPrefixes, defaultReadOnlyPrefixes)
-	writePrefixes := normalizePrefixes(cfg.WritePrefixes, defaultWritePrefixes)
-	confirmPrefixes := normalizePrefixes(cfg.ConfirmPrefixes, defaultConfirmPrefixes)
-	defaultText := "普通消息 - 直接发给当前后端（默认按当前会话模式执行）"
+	defaultText := "普通消息 - 直接发给当前后端，在当前项目和会话里继续工作"
 	if cfg.ImplicitMessageMode == "read" {
-		defaultText = "普通消息 - 直接发给当前后端（默认只读分析）"
+		defaultText = "普通消息 - 直接发给当前后端，默认按只读方式分析"
 	}
 	return strings.Join([]string{
-		"常用操作：",
-		"/status - 看当前项目、会话、模式、审批和运行状态",
-		fmt.Sprintf("%s 你的问题 - 只读分析，不改文件", readPrefixes[0]),
-		fmt.Sprintf("%s 你的需求 - 在当前项目执行后端任务", writePrefixes[0]),
-		"/stop - 停止当前正在执行的任务",
-		"/history - 回看当前项目最近任务",
-		"",
-		"详细命令：",
+		"默认交互：",
 		defaultText,
-		"/ping - 健康检查",
+		"",
+		"环境控制：",
 		"/help - 查看帮助",
-		"/backend current - 查看当前后端（codex/claude）",
-		"/backend use <codex|claude> - 切换后端",
-		"/status - 查看当前状态总览",
-		"/stop - 停止当前任务",
 		"/history - 查看当前项目最近任务",
+		"/stop - 停止当前正在执行的任务",
 		"/project list - 查看项目列表",
 		"/project current - 查看当前项目",
 		"/project use <别名> - 切换项目",
-		"/clear - 立即开启当前项目的新会话",
-		"/session list - 查看当前项目下的本地会话",
+		"/session list - 查看当前项目下的会话",
 		"/session current - 查看当前会话",
-		"/session new [名称] - 新建会话",
+		"/session new [名称] - 新建会话并切走当前上下文",
 		"/session switch <id> - 切换会话",
-		"/mode - 查看当前默认执行模式",
-		"/mode write|read - 设置普通消息和 /run 的默认模式",
-		fmt.Sprintf("%s - 确认执行高风险写操作", confirmPrefixes[0]),
-		"/approve [session] - 同意当前 Codex 原生审批（Codex 后端），可选本会话记忆",
-		"/deny - 拒绝当前 Codex 原生审批（Codex 后端）",
+		"/backend current - 查看当前后端（codex/claude）",
+		"/backend list - 查看可用后端",
+		"/backend use <codex|claude> - 切换后端",
+		"/approve [session] - 同意当前待处理审批，可选本会话记忆",
+		"/deny - 拒绝当前待处理审批",
 	}, "\n")
 }
