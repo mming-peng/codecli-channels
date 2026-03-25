@@ -19,6 +19,12 @@
 - bridge 怎么启动
 - 第一条消息怎么验证
 
+## 微信使用参考
+
+如果你想先看一下个人微信侧的使用效果，大致会是这样：
+
+![微信使用参考](docs/images/weixin-reference.jpg)
+
 ## 项目是什么
 
 `codecli-channels` 是一个自托管的本地 bridge，用来把聊天会话稳定映射到：

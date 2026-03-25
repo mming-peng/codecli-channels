@@ -7,6 +7,8 @@ logs/
 docs/*
 !docs/project-overview.md
 !docs/project-overview.zh-CN.md
+!docs/images/
+!docs/images/weixin-reference.jpg
 
 # Local runtime configs and backups.
 config/codecli-channels.json

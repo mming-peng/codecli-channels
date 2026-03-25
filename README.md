@@ -14,6 +14,12 @@ If you are setting this project up for the first time, skip the long-form detail
 
 These onboarding guides are currently written in Simplified Chinese and cover the real first steps: where to get credentials, how to fill the minimal config, and how to verify the first message flow.
 
+## Weixin Example
+
+If you want a quick feel for the personal Weixin experience, it looks like this:
+
+![Personal Weixin chat example](docs/images/weixin-reference.jpg)
+
 ## What It Is
 
 `codecli-channels` is a self-hosted local bridge that maps each chat conversation to:
