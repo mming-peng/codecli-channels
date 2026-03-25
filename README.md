@@ -221,7 +221,7 @@ This keeps the bridge opinionated about high-risk requests without replacing the
 - `internal/claude`: Claude Code headless runner
 - `internal/config`: config loading, normalization, and compatibility helpers
 - `internal/store`: persistent mapping for project, backend, session, and thread state
-- `docs/`: public docs plus dated design and plan notes
+- `quickstart/`: channel onboarding guides
 
 ## Limitations
 
@@ -233,21 +233,11 @@ This keeps the bridge opinionated about high-risk requests without replacing the
 
 ## Documentation
 
-Start here:
+Primary project documentation lives in:
 
-- [`docs/project-overview.md`](docs/project-overview.md)
-- [`docs/architecture.md`](docs/architecture.md)
-- [`docs/configuration.md`](docs/configuration.md)
-- [`docs/troubleshooting.md`](docs/troubleshooting.md)
-- [`docs/README.md`](docs/README.md)
-
-Chinese docs:
-
-- [`docs/project-overview.zh-CN.md`](docs/project-overview.zh-CN.md)
-- [`docs/architecture.zh-CN.md`](docs/architecture.zh-CN.md)
-- [`docs/configuration.zh-CN.md`](docs/configuration.zh-CN.md)
-- [`docs/troubleshooting.zh-CN.md`](docs/troubleshooting.zh-CN.md)
-- [`docs/README.zh-CN.md`](docs/README.zh-CN.md)
+- [`README.md`](README.md)
+- [`README.zh-CN.md`](README.zh-CN.md)
+- `quickstart/` for channel-specific onboarding notes
 
 ## Development
 

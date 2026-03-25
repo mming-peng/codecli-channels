@@ -55,9 +55,7 @@ If you change commands, config behavior, approval flow, or transport behavior, u
 
 - `README.md`
 - `README.zh-CN.md`
-- `docs/project-overview.md`
-- `docs/project-overview.zh-CN.md`
-- files under `docs/`
+- files under `quickstart/` when channel onboarding changes
 
 ## Security
 

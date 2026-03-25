@@ -221,7 +221,7 @@ go run ./cmd/codecli-channels weixin bind -config ./config/codecli-channels.json
 - `internal/claude`：Claude Code headless runner
 - `internal/config`：配置加载、归一化和兼容逻辑
 - `internal/store`：项目、后端、会话、线程状态的持久化
-- `docs/`：对外文档，以及带日期的设计/计划记录
+- `quickstart/`：各 channel 的接入说明
 
 ## 当前限制
 
@@ -233,21 +233,11 @@ go run ./cmd/codecli-channels weixin bind -config ./config/codecli-channels.json
 
 ## 文档
 
-建议从这里开始：
+当前保留的主要文档入口：
 
-- [`docs/project-overview.zh-CN.md`](docs/project-overview.zh-CN.md)
-- [`docs/architecture.zh-CN.md`](docs/architecture.zh-CN.md)
-- [`docs/configuration.zh-CN.md`](docs/configuration.zh-CN.md)
-- [`docs/troubleshooting.zh-CN.md`](docs/troubleshooting.zh-CN.md)
-- [`docs/README.zh-CN.md`](docs/README.zh-CN.md)
-
-英文文档：
-
-- [`docs/project-overview.md`](docs/project-overview.md)
-- [`docs/architecture.md`](docs/architecture.md)
-- [`docs/configuration.md`](docs/configuration.md)
-- [`docs/troubleshooting.md`](docs/troubleshooting.md)
-- [`docs/README.md`](docs/README.md)
+- [`README.zh-CN.md`](README.zh-CN.md)
+- [`README.md`](README.md)
+- `quickstart/` 里的 channel 接入说明
 
 ## 开发
 
